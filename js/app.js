@@ -276,27 +276,37 @@ function loadImageUrl(url) {
 }
 
 /**
- * Load PDF from remote URL, using CORS proxy as fallback.
- * Falls back to image loading if PDF loading fails.
+ * Load PDF from remote URL.
+ * Tries direct first, then multiple CORS proxies as fallback.
  * @param {string} rawUrl
  */
-function loadPdfUrl(rawUrl) {
-  const proxy   = `https://corsproxy.io/?${encodeURIComponent(rawUrl)}`;
-  const tryLoad = (u) => pdfjsLib.getDocument(u).promise;
+async function loadPdfUrl(rawUrl) {
+  const name = rawUrl.split('/').pop().split('?')[0] || 'document.pdf';
 
-  tryLoad(proxy)
-    .catch(() => tryLoad(rawUrl))
-    .then(doc => {
+  const candidates = [
+    rawUrl,
+    `https://corsproxy.io/?${encodeURIComponent(rawUrl)}`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(rawUrl)}`,
+  ];
+
+  for (const url of candidates) {
+    try {
+      const doc = await pdfjsLib.getDocument({ url, withCredentials: false }).promise;
       setLoadBar(80);
-      const name = rawUrl.split('/').pop().split('?')[0] || 'document.pdf';
-      const tab  = createTab(name, 'pdf');
+      const tab      = createTab(name, 'pdf');
       tab.pdfDoc     = doc;
       tab.totalPages = doc.numPages;
       activateTab(tab.id);
       setLoadBar(100);
       toast('<i class="fa-solid fa-circle-check"></i> PDF লোড হয়েছে', 'success');
-    })
-    .catch(() => loadImageUrl(rawUrl));
+      return;
+    } catch (e) {
+      // try next candidate
+    }
+  }
+
+  setLoadBar(100);
+  toast('<i class="fa-solid fa-circle-xmark"></i> PDF লোড ব্যর্থ — CORS বা URL সমস্যা হতে পারে।', 'error');
 }
 
 /* ════════════════════════════════════════════
