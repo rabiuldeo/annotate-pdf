@@ -9,9 +9,9 @@
 </p>
 
 <p align="center">
-  <a href="https://your-username.github.io/annotapdf/">🔗 Live Demo</a> ·
-  <a href="https://github.com/your-username/annotapdf/issues">🐛 Bug Report</a> ·
-  <a href="https://github.com/your-username/annotapdf/issues">💡 Feature Request</a>
+  <a href="https://rabiuldeo.github.io/annotapdf/">🔗 Live Demo</a> ·
+  <a href="https://github.com/rabiuldeo/annotapdf/issues">🐛 Bug Report</a> ·
+  <a href="https://github.com/rabiuldeo/annotapdf/issues">💡 Feature Request</a>
 </p>
 
 ---
@@ -42,14 +42,14 @@
 ### GitHub Pages থেকে
 
 ```
-https://your-username.github.io/annotapdf/
+https://rabiuldeo.github.io/annotapdf/
 ```
 
 ### লোকালি রান করুন
 
 ```bash
 # রিপোজিটরি ক্লোন করুন
-git clone https://github.com/your-username/annotapdf.git
+git clone https://github.com/rabiuldeo/annotapdf.git
 cd annotapdf
 
 # যেকোনো HTTP সার্ভার দিয়ে চালু করুন
