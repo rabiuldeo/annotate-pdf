@@ -1,7 +1,7 @@
-# AnnotaPDF — PDF ও ইমেজ হাইলাইটার
+# Annotate-PDF — PDF ও ইমেজ হাইলাইটার
 
 <p align="center">
-  <img src="assets/favicon.svg" alt="AnnotaPDF Logo" width="80">
+  <img src="assets/favicon.svg" alt="annotate-pdf Logo" width="80">
 </p>
 
 <p align="center">
@@ -9,9 +9,9 @@
 </p>
 
 <p align="center">
-  <a href="https://rabiuldeo.github.io/annotapdf/">🔗 Live Demo</a> ·
-  <a href="https://github.com/rabiuldeo/annotapdf/issues">🐛 Bug Report</a> ·
-  <a href="https://github.com/rabiuldeo/annotapdf/issues">💡 Feature Request</a>
+  <a href="https://rabiuldeo.github.io/annotate-pdf/">🔗 Live Demo</a> ·
+  <a href="https://github.com/rabiuldeo/annotate-pdf/issues">🐛 Bug Report</a> ·
+  <a href="https://github.com/rabiuldeo/annotate-pdf/issues">💡 Feature Request</a>
 </p>
 
 ---
@@ -42,15 +42,15 @@
 ### GitHub Pages থেকে
 
 ```
-https://rabiuldeo.github.io/annotapdf/
+https://rabiuldeo.github.io/annotate-pdf/
 ```
 
 ### লোকালি রান করুন
 
 ```bash
 # রিপোজিটরি ক্লোন করুন
-git clone https://github.com/rabiuldeo/annotapdf.git
-cd annotapdf
+git clone https://github.com/rabiuldeo/annotate-pdf.git
+cd annotate-pdf
 
 # যেকোনো HTTP সার্ভার দিয়ে চালু করুন
 npx serve .
@@ -66,7 +66,7 @@ python -m http.server 8000
 ## 📁 প্রজেক্ট স্ট্রাকচার
 
 ```
-annotapdf/
+annotate-pdf/
 ├── index.html          # মেইন HTML ফাইল
 ├── css/
 │   └── styles.css      # সম্পূর্ণ স্টাইলশিট
