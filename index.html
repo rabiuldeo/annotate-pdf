@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="bn" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="description" content="AnnotaPDF — বাংলা PDF ও ইমেজ হাইলাইটার। পেশাদার অ্যানোটেশন টুল।">
+  <meta name="theme-color" content="#3b5bdb">
+  <meta name="author" content="AnnotaPDF Team">
+
+  <!-- Open Graph -->
+  <meta property="og:title"       content="AnnotaPDF — PDF ও ইমেজ হাইলাইটার">
+  <meta property="og:description" content="PDF ও ইমেজে হাইলাইট করুন, অ্যানোটেশন করুন এবং সেভ করুন।">
+  <meta property="og:type"        content="website">
+
+  <title>AnnotaPDF — PDF ও ইমেজ হাইলাইটার</title>
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+  <link rel="icon" type="image/png"     href="assets/favicon.svg">
+  <link rel="apple-touch-icon"          href="assets/favicon.svg">
+
+  <!-- Font Awesome 6 Free (CDN) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+        integrity="sha512-SnH5WK+bZxgPHs44uWIX+LLJAJ9/2PkPKZ5QiAj6Ta86w+fsb2TkcmfRyVX3pBnMFcV7oQPJkl9QevSCWr3W=="
+        crossorigin="anonymous" referrerpolicy="no-referrer">
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+
+  <!-- App Stylesheet -->
+  <link rel="stylesheet" href="css/styles.css">
+
+  <!-- External Libraries -->
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════
+     LOADING BAR
+     ═══════════════════════════════════════════ -->
+<div id="load-bar" role="progressbar" aria-label="লোডিং..."></div>
+
+<!-- ═══════════════════════════════════════════
+     HEADER
+     ═══════════════════════════════════════════ -->
+<header id="header" role="banner">
+
+  <!-- Logo -->
+  <a class="logo" href="#" aria-label="AnnotaPDF হোম">
+    <div class="logo-mark" aria-hidden="true">
+      <i class="fa-solid fa-pen-to-square"></i>
+    </div>
+    <span class="logo-text">AnnotaPDF</span>
+    <span class="logo-badge">v4</span>
+  </a>
+
+  <!-- Header Actions -->
+  <div class="header-actions" role="toolbar" aria-label="হেডার টুলস">
+
+    <!-- URL Input -->
+    <div class="url-input-wrap" role="search">
+      <i class="fa-solid fa-link" aria-hidden="true"></i>
+      <input
+        type="url"
+        id="header-url-input"
+        placeholder="PDF বা ছবির URL দিন..."
+        aria-label="PDF বা ছবির URL"
+        autocomplete="off"
+        spellcheck="false">
+      <button class="btn btn-sm btn-primary" id="url-load-btn" aria-label="URL লোড করুন">
+        <i class="fa-solid fa-arrow-right"></i>
+        লোড
+      </button>
+    </div>
+
+    <div class="hdr-sep" aria-hidden="true"></div>
+
+    <button class="btn btn-md btn-ghost" id="header-file-btn" title="ফাইল খুলুন (Ctrl+O)">
+      <i class="fa-solid fa-folder-open"></i>
+      ফাইল
+    </button>
+
+    <button class="btn btn-md btn-success" id="save-btn" title="সেভ করুন (Ctrl+S)">
+      <i class="fa-solid fa-floppy-disk"></i>
+      সেভ
+    </button>
+
+    <button class="btn btn-icon btn-danger-ghost" id="clear-page-btn" title="এই পেজের হাইলাইট মুছুন">
+      <i class="fa-solid fa-trash-can"></i>
+    </button>
+
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════
+     TAB BAR
+     ═══════════════════════════════════════════ -->
+<div id="tab-bar" role="tablist" aria-label="খোলা ফাইলসমূহ">
+  <button class="tab-add" id="add-tab-btn" title="নতুন ফাইল যোগ করুন" aria-label="নতুন ট্যাব">
+    <i class="fa-solid fa-plus"></i>
+  </button>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     TOOLBAR
+     ═══════════════════════════════════════════ -->
+<div id="toolbar" role="toolbar" aria-label="এডিটিং টুলবার">
+
+  <!-- Draw mode -->
+  <button class="mode-btn active" data-mode="highlight" title="হাইলাইট মোড (H)">
+    <i class="fa-solid fa-highlighter"></i> হাইলাইট
+  </button>
+  <button class="mode-btn" data-mode="erase" title="ইরেজ মোড (E)">
+    <i class="fa-solid fa-eraser"></i> ইরেজ
+  </button>
+  <button class="mode-btn" data-mode="pan" title="প্যান মোড (P)">
+    <i class="fa-solid fa-hand"></i> প্যান
+  </button>
+
+  <div class="tool-sep" aria-hidden="true"></div>
+
+  <!-- Color swatches -->
+  <div class="swatches" role="group" aria-label="হাইলাইট রঙ">
+    <div class="swatch active" data-color="yellow" style="background:#FFC107" title="হলুদ" role="radio" aria-checked="true"  tabindex="0"></div>
+    <div class="swatch"        data-color="green"  style="background:#51CF66" title="সবুজ"  role="radio" aria-checked="false" tabindex="0"></div>
+    <div class="swatch"        data-color="blue"   style="background:#339AF0" title="নীল"   role="radio" aria-checked="false" tabindex="0"></div>
+    <div class="swatch"        data-color="red"    style="background:#FF6B6B" title="লাল"   role="radio" aria-checked="false" tabindex="0"></div>
+    <div class="swatch"        data-color="pink"   style="background:#F06595" title="গোলাপী" role="radio" aria-checked="false" tabindex="0"></div>
+    <div class="swatch"        data-color="orange" style="background:#FF922B" title="কমলা"  role="radio" aria-checked="false" tabindex="0"></div>
+    <div class="swatch"        data-color="purple" style="background:#9775FA" title="বেগুনি" role="radio" aria-checked="false" tabindex="0"></div>
+    <div class="swatch"        data-color="cyan"   style="background:#22D3EE" title="সায়ান" role="radio" aria-checked="false" tabindex="0"></div>
+    <!-- Custom color picker swatch -->
+    <div class="swatch custom-swatch" data-color="custom" style="background:#FFC107" title="কাস্টম রঙ বেছে নিন" role="radio" aria-checked="false" tabindex="0">
+      <input type="color" id="custom-color-picker" value="#FFC107" aria-label="কাস্টম রঙ নির্বাচন">
+    </div>
+  </div>
+
+  <div class="tool-sep" aria-hidden="true"></div>
+
+  <!-- Opacity -->
+  <div class="opacity-wrap" role="group" aria-label="অপাসিটি নিয়ন্ত্রণ">
+    <i class="fa-solid fa-droplet" style="color:var(--text-muted);font-size:0.75rem" aria-hidden="true"></i>
+    <span class="opacity-label" id="op-val" aria-live="polite">100%</span>
+    <input type="range" id="op-slider" min="10" max="100" value="100"
+           aria-label="অপাসিটি" aria-valuemin="10" aria-valuemax="100" aria-valuenow="100">
+  </div>
+
+  <div class="tool-sep" aria-hidden="true"></div>
+
+  <!-- Zoom -->
+  <button class="btn btn-ghost btn-icon" id="zoom-out" title="জুম আউট (Ctrl+–)" aria-label="জুম আউট">
+    <i class="fa-solid fa-magnifying-glass-minus"></i>
+  </button>
+  <span class="mono-label" id="zoom-label" aria-live="polite">100%</span>
+  <button class="btn btn-ghost btn-icon" id="zoom-in" title="জুম ইন (Ctrl++)" aria-label="জুম ইন">
+    <i class="fa-solid fa-magnifying-glass-plus"></i>
+  </button>
+  <button class="btn btn-ghost btn-icon" id="zoom-fit" title="ফিট করুন" aria-label="ফিট করুন">
+    <i class="fa-solid fa-expand"></i>
+  </button>
+
+  <div class="tool-sep" aria-hidden="true"></div>
+
+  <!-- Page navigation -->
+  <button class="btn btn-ghost btn-icon" id="prev-page" disabled title="আগের পেজ (←)" aria-label="আগের পেজ">
+    <i class="fa-solid fa-chevron-left"></i>
+  </button>
+  <span class="mono-label" id="page-label" title="পেজ নম্বরে ক্লিক করে সরাসরি যান" aria-live="polite" aria-label="পেজ সূচক">— / —</span>
+  <button class="btn btn-ghost btn-icon" id="next-page" disabled title="পরের পেজ (→)" aria-label="পরের পেজ">
+    <i class="fa-solid fa-chevron-right"></i>
+  </button>
+
+  <div class="tool-sep" aria-hidden="true"></div>
+
+  <!-- Rotation -->
+  <button class="btn btn-ghost btn-icon" id="rot-ccw" title="বামে ঘুরান (R)" aria-label="বামে ঘুরান">
+    <i class="fa-solid fa-rotate-left"></i>
+  </button>
+  <button class="btn btn-ghost btn-icon" id="rot-cw" title="ডানে ঘুরান" aria-label="ডানে ঘুরান">
+    <i class="fa-solid fa-rotate-right"></i>
+  </button>
+
+  <div class="tool-sep" aria-hidden="true"></div>
+
+  <!-- Undo / Redo -->
+  <button class="btn btn-ghost btn-icon" id="undo-btn" title="আনডু (Ctrl+Z)" aria-label="আনডু">
+    <i class="fa-solid fa-rotate-left"></i>
+  </button>
+  <button class="btn btn-ghost btn-icon" id="redo-btn" title="রিডু (Ctrl+Y)" aria-label="রিডু">
+    <i class="fa-solid fa-rotate-right"></i>
+  </button>
+
+</div>
+
+<!-- ═══════════════════════════════════════════
+     MAIN CONTENT
+     ═══════════════════════════════════════════ -->
+<main id="main" role="main">
+
+  <!-- ── DROP ZONE ── -->
+  <section id="drop-zone" aria-label="ফাইল আপলোড এলাকা">
+    <div class="dz-card">
+
+      <div class="dz-icon-wrap" aria-hidden="true">
+        <i class="fa-solid fa-file-pdf"></i>
+      </div>
+
+      <h1 class="dz-title">ফাইল আপলোড করুন</h1>
+      <p class="dz-sub">
+        <strong>PDF</strong> বা ইমেজ (<strong>JPG, PNG, WEBP</strong>) ফাইল এখানে<br>
+        টেনে আনুন অথবা নিচের বাটনে ক্লিক করুন।<br>
+        একসাথে একাধিক ফাইল দেওয়া যাবে।
+      </p>
+
+      <div class="dz-actions">
+        <button class="btn btn-primary btn-md" id="dz-file-btn">
+          <i class="fa-solid fa-folder-open"></i>
+          ফাইল বেছে নিন
+        </button>
+      </div>
+
+      <div class="dz-url-wrap">
+        <i class="fa-solid fa-link" aria-hidden="true"></i>
+        <input type="url" id="dz-url-input"
+               placeholder="অথবা PDF / ছবির URL দিন..."
+               aria-label="PDF বা ছবির URL"
+               autocomplete="off" spellcheck="false">
+        <button class="btn btn-sm btn-primary" id="dz-url-load-btn" aria-label="URL লোড করুন">
+          <i class="fa-solid fa-arrow-right"></i>
+          লোড
+        </button>
+      </div>
+
+      <p class="dz-hint" aria-hidden="true">
+        <i class="fa-solid fa-shield-halved"></i>
+        ফাইল শুধুমাত্র আপনার ব্রাউজারে প্রসেস হয় — সার্ভারে যায় না
+      </p>
+
+    </div>
+  </section>
+
+  <!-- ── CANVAS AREA ── -->
+  <section id="canvas-area" class="hidden" aria-label="ডকুমেন্ট ভিউ">
+    <div id="canvas-wrapper" role="img" aria-label="ডকুমেন্ট ক্যানভাস">
+      <canvas id="pdf-canvas"></canvas>
+      <canvas id="overlay-canvas" aria-hidden="true"></canvas>
+      <canvas id="draw-canvas"    aria-hidden="true"></canvas>
+    </div>
+  </section>
+
+  <!-- ── SIDEBAR ── -->
+  <aside id="sidebar" aria-label="হাইলাইট প্যানেল">
+
+    <div class="sb-tabs" role="tablist">
+      <button class="sb-tab active" role="tab" data-panel="hi-panel" aria-selected="true">
+        <i class="fa-solid fa-highlighter"></i>
+        হাইলাইট
+        <span class="count-badge" id="hi-count" aria-label="মোট হাইলাইট">0</span>
+      </button>
+      <button class="sb-tab" role="tab" data-panel="info-panel" aria-selected="false">
+        <i class="fa-solid fa-circle-info"></i>
+        তথ্য
+      </button>
+    </div>
+
+    <!-- Highlights panel -->
+    <div class="sb-panel active" id="hi-panel" role="tabpanel">
+      <div class="empty-state" id="hi-empty">
+        <i class="fa-solid fa-highlighter empty-icon"></i>
+        এখনো হাইলাইট নেই।<br>
+        ড্র্যাগ করে এলাকা সিলেক্ট করুন।
+      </div>
+      <div id="hi-list"></div>
+    </div>
+
+    <!-- Info panel -->
+    <div class="sb-panel" id="info-panel" role="tabpanel">
+      <div id="info-content"></div>
+    </div>
+
+  </aside>
+
+</main>
+
+<!-- ═══════════════════════════════════════════
+     MOBILE BOTTOM TOOLBAR
+     ═══════════════════════════════════════════ -->
+<nav id="mobile-tools" role="toolbar" aria-label="মোবাইল টুলবার">
+  <button class="mb-btn" id="mb-file" aria-label="ফাইল খুলুন">
+    <i class="fa-solid fa-folder-open"></i>
+    <span>ফাইল</span>
+  </button>
+  <button class="mb-btn active" id="mb-highlight" aria-label="হাইলাইট মোড">
+    <i class="fa-solid fa-highlighter"></i>
+    <span>হাইলাইট</span>
+  </button>
+  <button class="mb-btn" id="mb-color" aria-label="রঙ বেছে নিন">
+    <i class="fa-solid fa-palette"></i>
+    <span>রঙ</span>
+  </button>
+  <button class="mb-btn" id="mb-rotate" aria-label="ঘুরান">
+    <i class="fa-solid fa-rotate-right"></i>
+    <span>ঘুরান</span>
+  </button>
+  <button class="mb-btn" id="mb-save" aria-label="সেভ করুন">
+    <i class="fa-solid fa-floppy-disk"></i>
+    <span>সেভ</span>
+  </button>
+  <button class="mb-btn" id="mb-list" aria-label="হাইলাইট তালিকা">
+    <i class="fa-solid fa-list"></i>
+    <span>তালিকা</span>
+  </button>
+</nav>
+
+<!-- ═══════════════════════════════════════════
+     MOBILE SIDEBAR BOTTOM SHEET
+     ═══════════════════════════════════════════ -->
+<div class="modal-overlay" id="sidebar-modal" role="dialog" aria-modal="true" aria-label="হাইলাইট তালিকা">
+  <div class="modal-sheet">
+    <div class="modal-handle" aria-hidden="true"></div>
+    <div class="modal-title">
+      <i class="fa-solid fa-highlighter"></i>
+      হাইলাইট তালিকা
+    </div>
+    <div id="mobile-sb-content"></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     COLOR PICKER MODAL (MOBILE)
+     ═══════════════════════════════════════════ -->
+<div id="color-modal" role="dialog" aria-modal="true" aria-label="রঙ নির্বাচন">
+  <div class="color-panel">
+    <div class="color-panel-header">
+      <h3><i class="fa-solid fa-palette"></i> রঙ বেছে নিন</h3>
+      <button class="btn btn-icon btn-ghost" id="close-color-modal" aria-label="বন্ধ করুন">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+    </div>
+    <div class="color-grid" id="color-grid" role="group" aria-label="রঙের তালিকা"></div>
+    <p style="font-size:0.72rem;color:var(--text-muted);text-align:center;margin-top:4px">
+      <i class="fa-solid fa-info-circle"></i>
+      শেষ ঘরে ক্লিক করে কাস্টম রঙ বেছে নিন
+    </p>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     TOAST NOTIFICATION
+     ═══════════════════════════════════════════ -->
+<div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+<!-- ═══════════════════════════════════════════
+     HIDDEN FILE INPUT
+     ═══════════════════════════════════════════ -->
+<input type="file" id="file-input" accept="application/pdf,image/*" multiple aria-hidden="true">
+
+<!-- ═══════════════════════════════════════════
+     APP SCRIPT
+     ═══════════════════════════════════════════ -->
+<script>
+  // Wait for deferred scripts to load before running app.js
+  window.addEventListener('load', () => {
+    const s = document.createElement('script');
+    s.src = 'js/app.js';
+    document.body.appendChild(s);
+  });
+</script>
+
+</body>
+</html>
