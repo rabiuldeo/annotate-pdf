@@ -276,21 +276,17 @@ function loadImageUrl(url) {
 }
 
 /**
- * Fetch a URL through a proxy with streaming progress.
- * Returns ArrayBuffer or throws on failure.
+ * Fetch with streaming progress, returning ArrayBuffer.
  * @param {string} fetchUrl
+ * @param {object} opts  fetch() options
  * @returns {Promise<ArrayBuffer>}
  */
-async function fetchWithProgress(fetchUrl) {
-  const res = await fetch(fetchUrl);
+async function fetchWithProgress(fetchUrl, opts = {}) {
+  const res = await fetch(fetchUrl, opts);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-  // Stream with progress if Content-Length is known
   const contentLength = res.headers.get('Content-Length');
-  if (!contentLength || !res.body) {
-    // No streaming info — fallback to direct arrayBuffer
-    return res.arrayBuffer();
-  }
+  if (!contentLength || !res.body) return res.arrayBuffer();
 
   const total  = parseInt(contentLength, 10);
   const reader = res.body.getReader();
@@ -302,58 +298,93 @@ async function fetchWithProgress(fetchUrl) {
     if (done) break;
     chunks.push(value);
     received += value.length;
-    // Update progress bar: 5%–75% during download
-    const pct = Math.round(5 + (received / total) * 70);
-    setLoadBar(Math.min(pct, 75));
+    setLoadBar(Math.min(Math.round(5 + (received / total) * 70), 75));
   }
 
-  // Merge chunks into single ArrayBuffer
   const merged = new Uint8Array(received);
   let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.length;
-  }
+  for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.length; }
   return merged.buffer;
 }
 
 /**
  * Load PDF from remote URL.
- * Uses fetch()+streaming through CORS proxies → passes ArrayBuffer to pdf.js.
- * Handles large files via streaming progress, bypasses CORS block.
+ * Tries multiple strategies to bypass CORS and hotlink protection.
  * @param {string} rawUrl
  */
 async function loadPdfUrl(rawUrl) {
-  const name = rawUrl.split('/').pop().split('?')[0] || 'document.pdf';
+  const name   = rawUrl.split('/').pop().split('?')[0] || 'document.pdf';
+  const origin = new URL(rawUrl).origin;
 
-  const proxyUrls = [
-    `https://corsproxy.io/?${encodeURIComponent(rawUrl)}`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(rawUrl)}`,
-    rawUrl,  // direct last (works if server allows CORS)
+  // Strategy list — ordered by likelihood of success
+  const strategies = [
+    // 1. Direct with same-origin Referer (bypasses hotlink protection)
+    () => fetchWithProgress(rawUrl, {
+      headers: { 'Referer': origin, 'Origin': origin },
+      mode: 'cors',
+    }),
+    // 2. corsproxy.io — sets proper CORS headers + forwards Referer
+    () => fetchWithProgress(
+      `https://corsproxy.io/?${encodeURIComponent(rawUrl)}`
+    ),
+    // 3. allorigins — alternative proxy
+    () => fetchWithProgress(
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(rawUrl)}`
+    ),
+    // 4. Direct no-cors — gets opaque response, try passing URL to pdf.js directly
+    () => pdfjsLib.getDocument({
+      url: rawUrl,
+      httpHeaders: { 'Referer': origin },
+      withCredentials: false,
+    }).promise.then(doc => ({ _pdfDoc: doc })),
   ];
 
-  for (const proxyUrl of proxyUrls) {
+  for (const tryFn of strategies) {
     try {
       setLoadBar(5);
-      const buffer = await fetchWithProgress(proxyUrl);
-      if (buffer.byteLength < 100) continue;  // sanity check
+      const result = await tryFn();
+
+      // Strategy 4 returns pdf doc directly
+      if (result && result._pdfDoc) {
+        const doc = result._pdfDoc;
+        const tab = createTab(name, 'pdf');
+        tab.pdfDoc = doc; tab.totalPages = doc.numPages;
+        activateTab(tab.id); setLoadBar(100);
+        toast('<i class="fa-solid fa-circle-check"></i> PDF লোড হয়েছে', 'success');
+        return;
+      }
+
+      // Strategies 1-3 return ArrayBuffer
+      const buffer = result;
+      if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 100) continue;
 
       setLoadBar(80);
       const doc = await pdfjsLib.getDocument({ data: buffer }).promise;
-      const tab      = createTab(name, 'pdf');
-      tab.pdfDoc     = doc;
-      tab.totalPages = doc.numPages;
-      activateTab(tab.id);
-      setLoadBar(100);
+      const tab = createTab(name, 'pdf');
+      tab.pdfDoc = doc; tab.totalPages = doc.numPages;
+      activateTab(tab.id); setLoadBar(100);
       toast('<i class="fa-solid fa-circle-check"></i> PDF লোড হয়েছে', 'success');
       return;
     } catch (e) {
-      // try next proxy
+      // try next strategy
     }
   }
 
   setLoadBar(100);
-  toast('<i class="fa-solid fa-circle-xmark"></i> PDF লোড ব্যর্থ — URL টি সরাসরি অ্যাক্সেসযোগ্য কিনা দেখুন।', 'error');
+  // Offer manual download as last resort
+  const toastEl = document.getElementById('toast');
+  toastEl.innerHTML = `
+    <i class="fa-solid fa-circle-xmark"></i>
+    সার্ভার অ্যাক্সেস বন্ধ। &nbsp;
+    <a href="${rawUrl}" download target="_blank"
+       style="color:#fff;text-decoration:underline;font-weight:700;">
+      এখানে ডাউনলোড করুন
+    </a>
+    &nbsp;তারপর ফাইল হিসেবে খুলুন।
+  `;
+  toastEl.className = 'show error';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toastEl.className = ''; }, 7000);
 }
 
 /* ════════════════════════════════════════════
