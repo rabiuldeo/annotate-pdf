@@ -309,82 +309,72 @@ async function fetchWithProgress(fetchUrl, opts = {}) {
 
 /**
  * Load PDF from remote URL.
- * Tries multiple strategies to bypass CORS and hotlink protection.
+ * Strategy:
+ *  1. pdf.js direct URL — works when server has no CORS restriction (like govt sites accessible in browser)
+ *  2. fetch + proxy as ArrayBuffer — for CORS-blocked servers
  * @param {string} rawUrl
  */
 async function loadPdfUrl(rawUrl) {
-  const name   = rawUrl.split('/').pop().split('?')[0] || 'document.pdf';
-  const origin = new URL(rawUrl).origin;
+  const name = rawUrl.split('/').pop().split('?')[0] || 'document.pdf';
 
-  // Strategy list — ordered by likelihood of success
-  const strategies = [
-    // 1. Direct with same-origin Referer (bypasses hotlink protection)
-    () => fetchWithProgress(rawUrl, {
-      headers: { 'Referer': origin, 'Origin': origin },
-      mode: 'cors',
-    }),
-    // 2. corsproxy.io — sets proper CORS headers + forwards Referer
-    () => fetchWithProgress(
-      `https://corsproxy.io/?${encodeURIComponent(rawUrl)}`
-    ),
-    // 3. allorigins — alternative proxy
-    () => fetchWithProgress(
-      `https://api.allorigins.win/raw?url=${encodeURIComponent(rawUrl)}`
-    ),
-    // 4. Direct no-cors — gets opaque response, try passing URL to pdf.js directly
-    () => pdfjsLib.getDocument({
-      url: rawUrl,
-      httpHeaders: { 'Referer': origin },
-      withCredentials: false,
-    }).promise.then(doc => ({ _pdfDoc: doc })),
-  ];
-
-  for (const tryFn of strategies) {
-    try {
-      setLoadBar(5);
-      const result = await tryFn();
-
-      // Strategy 4 returns pdf doc directly
-      if (result && result._pdfDoc) {
-        const doc = result._pdfDoc;
-        const tab = createTab(name, 'pdf');
-        tab.pdfDoc = doc; tab.totalPages = doc.numPages;
-        activateTab(tab.id); setLoadBar(100);
-        toast('<i class="fa-solid fa-circle-check"></i> PDF লোড হয়েছে', 'success');
-        return;
-      }
-
-      // Strategies 1-3 return ArrayBuffer
-      const buffer = result;
-      if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 100) continue;
-
-      setLoadBar(80);
-      const doc = await pdfjsLib.getDocument({ data: buffer }).promise;
-      const tab = createTab(name, 'pdf');
-      tab.pdfDoc = doc; tab.totalPages = doc.numPages;
-      activateTab(tab.id); setLoadBar(100);
-      toast('<i class="fa-solid fa-circle-check"></i> PDF লোড হয়েছে', 'success');
-      return;
-    } catch (e) {
-      // try next strategy
-    }
+  // Helper: create tab and show success
+  function openDoc(doc) {
+    const tab = createTab(name, 'pdf');
+    tab.pdfDoc = doc; tab.totalPages = doc.numPages;
+    activateTab(tab.id); setLoadBar(100);
+    toast('<i class="fa-solid fa-circle-check"></i> PDF লোড হয়েছে', 'success');
   }
 
+  setLoadBar(5);
+
+  // ── Strategy 1: Give URL directly to pdf.js (no fetch, no CORS issue) ──
+  // pdf.js uses XHR with range requests — browser allows this for direct navigation
+  // Works for servers that block cross-origin fetch but allow XHR (most govt sites)
+  try {
+    const doc = await pdfjsLib.getDocument({
+      url: rawUrl,
+      withCredentials: false,
+      disableRange: false,
+      disableStream: false,
+    }).promise;
+    openDoc(doc); return;
+  } catch (e) { /* try next */ }
+
+  // ── Strategy 2: fetch via corsproxy.io → ArrayBuffer ──
+  try {
+    setLoadBar(10);
+    const buf = await fetchWithProgress(`https://corsproxy.io/?${encodeURIComponent(rawUrl)}`);
+    if (buf.byteLength > 100) {
+      const doc = await pdfjsLib.getDocument({ data: buf }).promise;
+      openDoc(doc); return;
+    }
+  } catch (e) { /* try next */ }
+
+  // ── Strategy 3: fetch via allorigins → ArrayBuffer ──
+  try {
+    setLoadBar(15);
+    const buf = await fetchWithProgress(`https://api.allorigins.win/raw?url=${encodeURIComponent(rawUrl)}`);
+    if (buf.byteLength > 100) {
+      const doc = await pdfjsLib.getDocument({ data: buf }).promise;
+      openDoc(doc); return;
+    }
+  } catch (e) { /* try next */ }
+
+  // ── All failed ──
   setLoadBar(100);
-  // Offer manual download as last resort
   const toastEl = document.getElementById('toast');
   toastEl.innerHTML = `
     <i class="fa-solid fa-circle-xmark"></i>
-    সার্ভার অ্যাক্সেস বন্ধ। &nbsp;
+    লোড ব্যর্থ। &nbsp;
     <a href="${rawUrl}" download target="_blank"
-       style="color:#fff;text-decoration:underline;font-weight:700;">
-      এখানে ডাউনলোড করুন
+       style="color:#fff;font-weight:700;text-decoration:underline;">
+      ডাউনলোড করুন
     </a>
     &nbsp;তারপর ফাইল হিসেবে খুলুন।
   `;
   toastEl.className = 'show error';
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { toastEl.className = ''; }, 7000);
+  toastTimer = setTimeout(() => { toastEl.className = ''; }, 8000);
 }
 
 /* ════════════════════════════════════════════
