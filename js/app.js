@@ -276,29 +276,70 @@ function loadImageUrl(url) {
 }
 
 /**
+ * Fetch a URL through a proxy with streaming progress.
+ * Returns ArrayBuffer or throws on failure.
+ * @param {string} fetchUrl
+ * @returns {Promise<ArrayBuffer>}
+ */
+async function fetchWithProgress(fetchUrl) {
+  const res = await fetch(fetchUrl);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  // Stream with progress if Content-Length is known
+  const contentLength = res.headers.get('Content-Length');
+  if (!contentLength || !res.body) {
+    // No streaming info — fallback to direct arrayBuffer
+    return res.arrayBuffer();
+  }
+
+  const total  = parseInt(contentLength, 10);
+  const reader = res.body.getReader();
+  const chunks = [];
+  let received = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    // Update progress bar: 5%–75% during download
+    const pct = Math.round(5 + (received / total) * 70);
+    setLoadBar(Math.min(pct, 75));
+  }
+
+  // Merge chunks into single ArrayBuffer
+  const merged = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return merged.buffer;
+}
+
+/**
  * Load PDF from remote URL.
- * Uses fetch() through CORS proxies to get ArrayBuffer,
- * then passes data directly to pdf.js — bypasses CORS block.
+ * Uses fetch()+streaming through CORS proxies → passes ArrayBuffer to pdf.js.
+ * Handles large files via streaming progress, bypasses CORS block.
  * @param {string} rawUrl
  */
 async function loadPdfUrl(rawUrl) {
   const name = rawUrl.split('/').pop().split('?')[0] || 'document.pdf';
 
-  // Proxy list — fetch returns ArrayBuffer, avoiding pdf.js CORS issues
-  const proxies = [
-    (u) => fetch(`https://corsproxy.io/?${encodeURIComponent(u)}`),
-    (u) => fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`),
-    (u) => fetch(u),  // direct last (works if server has CORS headers)
+  const proxyUrls = [
+    `https://corsproxy.io/?${encodeURIComponent(rawUrl)}`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(rawUrl)}`,
+    rawUrl,  // direct last (works if server allows CORS)
   ];
 
-  for (const proxyFn of proxies) {
+  for (const proxyUrl of proxyUrls) {
     try {
-      const res = await proxyFn(rawUrl);
-      if (!res.ok) continue;
-      const buffer = await res.arrayBuffer();
+      setLoadBar(5);
+      const buffer = await fetchWithProgress(proxyUrl);
       if (buffer.byteLength < 100) continue;  // sanity check
-      const doc = await pdfjsLib.getDocument({ data: buffer }).promise;
+
       setLoadBar(80);
+      const doc = await pdfjsLib.getDocument({ data: buffer }).promise;
       const tab      = createTab(name, 'pdf');
       tab.pdfDoc     = doc;
       tab.totalPages = doc.numPages;
