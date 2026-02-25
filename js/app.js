@@ -277,21 +277,27 @@ function loadImageUrl(url) {
 
 /**
  * Load PDF from remote URL.
- * Tries direct first, then multiple CORS proxies as fallback.
+ * Uses fetch() through CORS proxies to get ArrayBuffer,
+ * then passes data directly to pdf.js — bypasses CORS block.
  * @param {string} rawUrl
  */
 async function loadPdfUrl(rawUrl) {
   const name = rawUrl.split('/').pop().split('?')[0] || 'document.pdf';
 
-  const candidates = [
-    rawUrl,
-    `https://corsproxy.io/?${encodeURIComponent(rawUrl)}`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(rawUrl)}`,
+  // Proxy list — fetch returns ArrayBuffer, avoiding pdf.js CORS issues
+  const proxies = [
+    (u) => fetch(`https://corsproxy.io/?${encodeURIComponent(u)}`),
+    (u) => fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`),
+    (u) => fetch(u),  // direct last (works if server has CORS headers)
   ];
 
-  for (const url of candidates) {
+  for (const proxyFn of proxies) {
     try {
-      const doc = await pdfjsLib.getDocument({ url, withCredentials: false }).promise;
+      const res = await proxyFn(rawUrl);
+      if (!res.ok) continue;
+      const buffer = await res.arrayBuffer();
+      if (buffer.byteLength < 100) continue;  // sanity check
+      const doc = await pdfjsLib.getDocument({ data: buffer }).promise;
       setLoadBar(80);
       const tab      = createTab(name, 'pdf');
       tab.pdfDoc     = doc;
@@ -301,12 +307,12 @@ async function loadPdfUrl(rawUrl) {
       toast('<i class="fa-solid fa-circle-check"></i> PDF লোড হয়েছে', 'success');
       return;
     } catch (e) {
-      // try next candidate
+      // try next proxy
     }
   }
 
   setLoadBar(100);
-  toast('<i class="fa-solid fa-circle-xmark"></i> PDF লোড ব্যর্থ — CORS বা URL সমস্যা হতে পারে।', 'error');
+  toast('<i class="fa-solid fa-circle-xmark"></i> PDF লোড ব্যর্থ — URL টি সরাসরি অ্যাক্সেসযোগ্য কিনা দেখুন।', 'error');
 }
 
 /* ════════════════════════════════════════════
