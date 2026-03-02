@@ -1,160 +1,105 @@
 /**
- * AnnotaPDF — PDF & Image Highlighter
- * app.js — Main Application Logic
- * Author: AnnotaPDF Team
- * Version: 4.0.0
- * License: MIT
- *
- * Dependencies:
- *   - pdf.js  v3.11.174  (CDN)
- *   - jsPDF   v2.5.1     (CDN)
+ * AnnotaPDF v5 — Chrome-style PDF Viewer
+ * Multi-page scroll, per-page rotation, auto-save
  */
-
 'use strict';
 
-/* ════════════════════════════════════════════
-   PDF.JS WORKER CONFIG
-   ════════════════════════════════════════════ */
+/* ── PDF.JS CONFIG ── */
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-/* ════════════════════════════════════════════
-   CONSTANTS
-   ════════════════════════════════════════════ */
-
-/** Preset highlight colors (name → RGBA components + hex) */
+/* ── CONSTANTS ── */
 const COLOR_MAP = {
-  yellow: { r: 255, g: 193, b: 7,   hex: '#FFC107' },
-  green:  { r:  81, g: 207, b: 102, hex: '#51CF66' },
-  blue:   { r:  51, g: 154, b: 240, hex: '#339AF0' },
-  red:    { r: 255, g: 107, b: 107, hex: '#FF6B6B' },
-  pink:   { r: 240, g: 101, b: 149, hex: '#F06595' },
-  orange: { r: 255, g: 146, b:  43, hex: '#FF922B' },
-  purple: { r: 151, g: 117, b: 250, hex: '#9775FA' },
-  cyan:   { r:  34, g: 211, b: 238, hex: '#22D3EE' },
-  custom: { r: 255, g: 193, b:   7, hex: '#FFC107' }, // user-defined
+  yellow: { r:255, g:193, b:7,   hex:'#FFC107' },
+  green:  { r: 52, g:168, b:83,  hex:'#34A853' },
+  blue:   { r: 66, g:133, b:244, hex:'#4285F4' },
+  red:    { r:234, g: 67, b:53,  hex:'#EA4335' },
+  pink:   { r:255, g:105, b:180, hex:'#FF69B4' },
+  orange: { r:255, g:146, b: 43, hex:'#FF922B' },
+  purple: { r:151, g:117, b:250, hex:'#9775FA' },
+  cyan:   { r: 34, g:211, b:238, hex:'#22D3EE' },
+  custom: { r:255, g:193, b:  7, hex:'#FFC107' },
 };
 
-const PDF_RENDER_SCALE  = 1.5;   // Default display scale
-const SAVE_RENDER_SCALE = 3.0;   // High-resolution for exported PDF/PNG
-const MAX_HISTORY_STEPS = 50;    // Undo stack limit
-const MIN_HIGHLIGHT_PX  = 5;     // Minimum rect size to register a highlight
+const BASE_SCALE      = 1.5;   // PDF render scale at 100%
+const SAVE_SCALE      = 3.0;   // Export quality
+const MAX_HISTORY     = 50;
+const MIN_HIGHLIGHT   = 4;     // px
 
-/* ════════════════════════════════════════════
-   APPLICATION STATE
-   ════════════════════════════════════════════ */
-
-let tabs         = [];           // Array of TabState instances
+/* ── STATE ── */
+let tabs         = [];
 let activeTabId  = null;
-let drawMode     = 'highlight';  // 'highlight' | 'erase' | 'pan'
+let drawMode     = 'highlight';
 let activeColor  = 'yellow';
-let activeOpacity = 100;         // 10–100 %
-let isDrawing    = false;
-let startX       = 0;
-let startY       = 0;
-let panStartX    = 0;
-let panStartY    = 0;
-let panScrollX   = 0;
-let panScrollY   = 0;
-
-/** Active PDF.js render task — cancelled when switching pages */
-let currentRenderTask = null;
-
-/** Auto-incrementing tab ID counter */
+let activeOpacity = 60;
+let zoomLevel    = 1.0;       // multiplier on BASE_SCALE
 let tabIdCounter = 0;
 
-/* ════════════════════════════════════════════
-   TAB STATE CLASS
-   ════════════════════════════════════════════ */
+/* ── DOM ── */
+const fileInput    = document.getElementById('file-input');
+const loadBar      = document.getElementById('load-bar');
+const tabBar       = document.getElementById('tab-bar');
+const addTabBtn    = document.getElementById('add-tab-btn');
+const dropZone     = document.getElementById('drop-zone');
+const pagesContainer = document.getElementById('pages-container');
+const thumbList    = document.getElementById('thumb-list');
+const thumbEmpty   = document.getElementById('thumb-empty');
+const hiList       = document.getElementById('hi-list');
+const hiEmpty      = document.getElementById('hi-empty');
+const hiCount      = document.getElementById('hi-count');
+const opSlider     = document.getElementById('op-slider');
+const opVal        = document.getElementById('op-val');
+const zoomLabelBtn = document.getElementById('zoom-label');
+
+/* ═══════════════════════════════════════════
+   TAB STATE
+   ═══════════════════════════════════════════ */
 class TabState {
-  /**
-   * @param {number} id
-   * @param {string} name  File name
-   * @param {'pdf'|'image'} type
-   */
   constructor(id, name, type) {
     this.id          = id;
     this.name        = name;
-    this.type        = type;
-    this.pdfDoc      = null;     // pdfjsLib PDFDocumentProxy
-    this.imgElement  = null;     // HTMLImageElement
-    this.imgSrc      = null;     // object URL or remote URL
-    this.currentPage = 1;
+    this.type        = type;   // 'pdf' | 'image'
+    this.pdfDoc      = null;
+    this.imgElement  = null;
+    this.imgSrc      = null;
     this.totalPages  = 1;
-    this.scale       = PDF_RENDER_SCALE;
-    this.baseScale   = PDF_RENDER_SCALE;
-    this.rotation    = 0;        // degrees: 0 | 90 | 180 | 270
+    this.unsaved     = false;
 
-    /** @type {Array<{id:number, page:number, x:number, y:number, w:number, h:number, color:string, opacity:number}>} */
+    /** Per-page rotation: Map<pageNum, degrees> */
+    this.pageRotation = new Map();
+
+    /**
+     * highlights: [{id, page, x, y, w, h, color, opacity}]
+     * x,y,w,h stored at BASE_SCALE*zoom=1 (normalised)
+     */
     this.highlights  = [];
+    this.history     = [];
+    this.future      = [];
 
-    this.history     = [];       // Undo stack (array of deep-cloned highlight arrays)
-    this.future      = [];       // Redo stack
+    /** file handle for auto-save (File System Access API) */
+    this.fileHandle  = null;
+    this.localFile   = null;  // original File object for auto-save fallback
   }
-
-  /** Returns the DOM tab element for this TabState */
-  get tabEl() {
-    return document.querySelector(`.tab[data-id="${this.id}"]`);
-  }
+  getRotation(page) { return this.pageRotation.get(page) || 0; }
+  setRotation(page, deg) { this.pageRotation.set(page, ((deg % 360) + 360) % 360); }
 }
 
-/* ════════════════════════════════════════════
-   DOM REFERENCES
-   ════════════════════════════════════════════ */
-const tabBar        = document.getElementById('tab-bar');
-const addTabBtn     = document.getElementById('add-tab-btn');
-const dropZone      = document.getElementById('drop-zone');
-const canvasArea    = document.getElementById('canvas-area');
-const canvasWrapper = document.getElementById('canvas-wrapper');
-const pdfCanvas     = document.getElementById('pdf-canvas');
-const overlayCanvas = document.getElementById('overlay-canvas');
-const drawCanvas    = document.getElementById('draw-canvas');
-const sidebar       = document.getElementById('sidebar');
-const hiList        = document.getElementById('hi-list');
-const hiEmpty       = document.getElementById('hi-empty');
-const hiCountBadge  = document.getElementById('hi-count');
-const infoContent   = document.getElementById('info-content');
-const pageLabel     = document.getElementById('page-label');
-const zoomLabel     = document.getElementById('zoom-label');
-const fileInput     = document.getElementById('file-input');
-const loadBar       = document.getElementById('load-bar');
-
-const ctx  = pdfCanvas.getContext('2d');
-const octx = overlayCanvas.getContext('2d');
-const dctx = drawCanvas.getContext('2d');
-
-/* ════════════════════════════════════════════
-   LOADING BAR
-   ════════════════════════════════════════════ */
-/**
- * Control the top progress bar.
- * @param {number} pct  0 = show & start, 100 = finish & hide, else set width
- */
+/* ═══════════════════════════════════════════
+   LOAD BAR & TOAST
+   ═══════════════════════════════════════════ */
 function setLoadBar(pct) {
   if (pct === 0) {
     loadBar.style.display = 'block';
-    loadBar.style.width   = '5%';
+    loadBar.style.width = '5%';
   } else if (pct >= 100) {
     loadBar.style.width = '100%';
-    setTimeout(() => {
-      loadBar.style.display = 'none';
-      loadBar.style.width   = '0%';
-    }, 380);
+    setTimeout(() => { loadBar.style.display = 'none'; loadBar.style.width = '0'; }, 350);
   } else {
     loadBar.style.width = pct + '%';
   }
 }
 
-/* ════════════════════════════════════════════
-   TOAST NOTIFICATION
-   ════════════════════════════════════════════ */
 let toastTimer = null;
-
-/**
- * Show a brief toast notification.
- * @param {string} msg
- * @param {'success'|'error'|'warning'|''} type
- */
 function toast(msg, type = '') {
   const el = document.getElementById('toast');
   el.innerHTML = msg;
@@ -163,26 +108,17 @@ function toast(msg, type = '') {
   toastTimer = setTimeout(() => { el.className = ''; }, 2800);
 }
 
-/* ════════════════════════════════════════════
+/* ═══════════════════════════════════════════
    FILE HANDLING
-   ════════════════════════════════════════════ */
-
-/**
- * Open a FileList — dispatch each file by MIME type.
- * @param {FileList} files
- */
+   ═══════════════════════════════════════════ */
 function openFiles(files) {
   [...files].forEach(f => {
-    if (f.type === 'application/pdf')        loadPdfFile(f);
-    else if (f.type.startsWith('image/'))    loadImageFile(f);
-    else toast(`<i class="fa-solid fa-circle-exclamation"></i> সাপোর্টেড নয়: ${f.name}`, 'error');
+    if (f.type === 'application/pdf') loadPdfFile(f);
+    else if (f.type.startsWith('image/')) loadImageFile(f);
+    else toast(`সাপোর্টেড নয়: ${f.name}`, 'error');
   });
 }
 
-/**
- * Load a PDF File object via pdf.js.
- * @param {File} file
- */
 async function loadPdfFile(file) {
   setLoadBar(0);
   try {
@@ -193,223 +129,149 @@ async function loadPdfFile(file) {
     const tab = createTab(file.name, 'pdf');
     tab.pdfDoc     = doc;
     tab.totalPages = doc.numPages;
+    tab.localFile  = file;
+    // Try to get file handle for auto-save
     activateTab(tab.id);
     setLoadBar(100);
-    toast(`<i class="fa-solid fa-circle-check"></i> ${file.name} লোড হয়েছে (${doc.numPages} পেজ)`, 'success');
-  } catch (e) {
+    toast(`<i class="fa-solid fa-circle-check"></i> ${file.name} (${doc.numPages} পেজ)`, 'success');
+    autoLoadThumbs(tab);
+  } catch(e) {
     setLoadBar(100);
-    console.error('[AnnotaPDF] PDF load error:', e);
-    toast('<i class="fa-solid fa-circle-xmark"></i> PDF লোড ব্যর্থ হয়েছে', 'error');
+    console.error(e);
+    toast('PDF লোড ব্যর্থ', 'error');
   }
 }
 
-/**
- * Load an image File object.
- * @param {File} file
- */
 function loadImageFile(file) {
   setLoadBar(0);
   const url = URL.createObjectURL(file);
   const img = new Image();
   img.onload = () => {
-    setLoadBar(80);
     const tab = createTab(file.name, 'image');
     tab.imgElement = img;
     tab.imgSrc     = url;
-    tab.totalPages = 1;
+    tab.localFile  = file;
     activateTab(tab.id);
     setLoadBar(100);
-    toast(`<i class="fa-solid fa-circle-check"></i> ${file.name} লোড হয়েছে`, 'success');
+    toast(`<i class="fa-solid fa-circle-check"></i> ${file.name}`, 'success');
+    autoLoadThumbs(tab);
   };
-  img.onerror = () => {
-    setLoadBar(100);
-    URL.revokeObjectURL(url);
-    toast('<i class="fa-solid fa-circle-xmark"></i> ইমেজ লোড ব্যর্থ হয়েছে', 'error');
-  };
+  img.onerror = () => { setLoadBar(100); toast('ইমেজ লোড ব্যর্থ', 'error'); };
   img.src = url;
+  setLoadBar(60);
 }
 
-/**
- * Load a file from a URL string.
- * Clears the source input after triggering.
- * @param {string} rawUrl
- * @param {HTMLInputElement|null} inputEl  Input element to clear
- */
-function loadFromUrl(rawUrl, inputEl = null) {
+/* URL LOADING */
+async function loadFromUrl(rawUrl, inputEl = null) {
   const url = rawUrl.trim();
-  if (!url) {
-    toast('<i class="fa-solid fa-triangle-exclamation"></i> URL দিন', 'warning');
-    return;
-  }
+  if (!url) { toast('URL দিন', 'warning'); return; }
   if (inputEl) inputEl.value = '';
-  setLoadBar(0);
-
-  const ext   = url.split('?')[0].split('.').pop().toLowerCase();
-  const isImg = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'svg'].includes(ext);
-
+  const ext = url.split('?')[0].split('.').pop().toLowerCase();
+  const isImg = ['jpg','jpeg','png','webp','gif','bmp','svg'].includes(ext);
   if (isImg) loadImageUrl(url);
-  else       loadPdfUrl(url);
+  else       await loadPdfUrl(url);
 }
 
-/**
- * Load image from remote URL.
- * @param {string} url
- */
 function loadImageUrl(url) {
   const img = new Image();
   img.crossOrigin = 'anonymous';
   img.onload = () => {
-    setLoadBar(80);
     const name = url.split('/').pop().split('?')[0] || 'image';
     const tab  = createTab(name, 'image');
     tab.imgElement = img;
     tab.imgSrc     = url;
     activateTab(tab.id);
     setLoadBar(100);
-    toast('<i class="fa-solid fa-circle-check"></i> ইমেজ লোড হয়েছে', 'success');
+    toast('ইমেজ লোড হয়েছে', 'success');
+    autoLoadThumbs(tab);
   };
-  img.onerror = () => {
-    setLoadBar(100);
-    toast('<i class="fa-solid fa-circle-xmark"></i> ইমেজ লোড ব্যর্থ', 'error');
-  };
+  img.onerror = () => toast('ইমেজ লোড ব্যর্থ', 'error');
   img.src = url;
+  setLoadBar(30);
 }
 
-/**
- * Fetch with streaming progress, returning ArrayBuffer.
- * @param {string} fetchUrl
- * @param {object} opts  fetch() options
- * @returns {Promise<ArrayBuffer>}
- */
 async function fetchWithProgress(fetchUrl, opts = {}) {
   const res = await fetch(fetchUrl, opts);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
   const contentLength = res.headers.get('Content-Length');
   if (!contentLength || !res.body) return res.arrayBuffer();
-
   const total  = parseInt(contentLength, 10);
   const reader = res.body.getReader();
-  const chunks = [];
-  let received = 0;
-
+  const chunks = []; let received = 0;
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    chunks.push(value);
-    received += value.length;
-    setLoadBar(Math.min(Math.round(5 + (received / total) * 70), 75));
+    chunks.push(value); received += value.length;
+    setLoadBar(Math.min(5 + Math.round(received/total*70), 75));
   }
-
-  const merged = new Uint8Array(received);
-  let offset = 0;
-  for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.length; }
+  const merged = new Uint8Array(received); let offset = 0;
+  for (const c of chunks) { merged.set(c, offset); offset += c.length; }
   return merged.buffer;
 }
 
-/**
- * Load PDF from remote URL.
- * Strategy:
- *  1. pdf.js direct URL — works when server has no CORS restriction (like govt sites accessible in browser)
- *  2. fetch + proxy as ArrayBuffer — for CORS-blocked servers
- * @param {string} rawUrl
- */
 async function loadPdfUrl(rawUrl) {
   const name = rawUrl.split('/').pop().split('?')[0] || 'document.pdf';
-
-  // Helper: create tab and show success
-  function openDoc(doc) {
-    const tab = createTab(name, 'pdf');
-    tab.pdfDoc = doc; tab.totalPages = doc.numPages;
-    activateTab(tab.id); setLoadBar(100);
-    toast('<i class="fa-solid fa-circle-check"></i> PDF লোড হয়েছে', 'success');
-  }
-
   setLoadBar(5);
 
-  // ── Strategy 1: Give URL directly to pdf.js (no fetch, no CORS issue) ──
-  // pdf.js uses XHR with range requests — browser allows this for direct navigation
-  // Works for servers that block cross-origin fetch but allow XHR (most govt sites)
-  try {
-    const doc = await pdfjsLib.getDocument({
-      url: rawUrl,
-      withCredentials: false,
-      disableRange: false,
-      disableStream: false,
-    }).promise;
-    openDoc(doc); return;
-  } catch (e) { /* try next */ }
+  function openDoc(doc) {
+    const tab = createTab(name, 'pdf');
+    tab.pdfDoc     = doc;
+    tab.totalPages = doc.numPages;
+    activateTab(tab.id);
+    setLoadBar(100);
+    toast('PDF লোড হয়েছে', 'success');
+    autoLoadThumbs(tab);
+  }
 
-  // ── Strategy 2: fetch via corsproxy.io → ArrayBuffer ──
+  // Strategy 1: pdf.js direct URL (no fetch = no CORS issue)
+  try {
+    const doc = await pdfjsLib.getDocument({ url: rawUrl, withCredentials: false }).promise;
+    openDoc(doc); return;
+  } catch(_) {}
+
+  // Strategy 2: corsproxy.io
   try {
     setLoadBar(10);
     const buf = await fetchWithProgress(`https://corsproxy.io/?${encodeURIComponent(rawUrl)}`);
-    if (buf.byteLength > 100) {
-      const doc = await pdfjsLib.getDocument({ data: buf }).promise;
-      openDoc(doc); return;
-    }
-  } catch (e) { /* try next */ }
+    if (buf.byteLength > 100) { openDoc(await pdfjsLib.getDocument({ data: buf }).promise); return; }
+  } catch(_) {}
 
-  // ── Strategy 3: fetch via allorigins → ArrayBuffer ──
+  // Strategy 3: allorigins
   try {
     setLoadBar(15);
     const buf = await fetchWithProgress(`https://api.allorigins.win/raw?url=${encodeURIComponent(rawUrl)}`);
-    if (buf.byteLength > 100) {
-      const doc = await pdfjsLib.getDocument({ data: buf }).promise;
-      openDoc(doc); return;
-    }
-  } catch (e) { /* try next */ }
+    if (buf.byteLength > 100) { openDoc(await pdfjsLib.getDocument({ data: buf }).promise); return; }
+  } catch(_) {}
 
-  // ── All failed ──
+  // Fallback
   setLoadBar(100);
   const toastEl = document.getElementById('toast');
-  toastEl.innerHTML = `
-    <i class="fa-solid fa-circle-xmark"></i>
-    লোড ব্যর্থ। &nbsp;
-    <a href="${rawUrl}" download target="_blank"
-       style="color:#fff;font-weight:700;text-decoration:underline;">
-      ডাউনলোড করুন
-    </a>
-    &nbsp;তারপর ফাইল হিসেবে খুলুন।
-  `;
+  toastEl.innerHTML = `লোড ব্যর্থ। <a href="${rawUrl}" download target="_blank" style="color:#fff;font-weight:700;text-decoration:underline;">ডাউনলোড করুন</a> তারপর ফাইল হিসেবে খুলুন।`;
   toastEl.className = 'show error';
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { toastEl.className = ''; }, 8000);
+  toastTimer = setTimeout(() => { toastEl.className = ''; }, 9000);
 }
 
-/* ════════════════════════════════════════════
+/* ═══════════════════════════════════════════
    TAB MANAGEMENT
-   ════════════════════════════════════════════ */
-
-/**
- * Create a new tab and register it in the tab bar.
- * @param {string} name
- * @param {'pdf'|'image'} type
- * @returns {TabState}
- */
+   ═══════════════════════════════════════════ */
 function createTab(name, type) {
   const id  = ++tabIdCounter;
   const tab = new TabState(id, name, type);
   tabs.push(tab);
-  renderTabElement(tab);
+  renderTabEl(tab);
   return tab;
 }
 
-/**
- * Render a tab DOM element and insert before the "+" button.
- * @param {TabState} tab
- */
-function renderTabElement(tab) {
+function renderTabEl(tab) {
   const el = document.createElement('div');
-  el.className    = 'tab';
-  el.dataset.id   = tab.id;
-  el.title        = tab.name;
+  el.className = 'tab';
+  el.dataset.id = tab.id;
+  el.title = tab.name;
   el.innerHTML = `
-    <span class="tab-badge ${tab.type}">${tab.type === 'pdf' ? 'PDF' : 'IMG'}</span>
+    <span class="tab-type ${tab.type}">${tab.type === 'pdf' ? 'PDF' : 'IMG'}</span>
     <span class="tab-name">${tab.name}</span>
-    <span class="tab-close" data-id="${tab.id}" title="বন্ধ করুন">
-      <i class="fa-solid fa-xmark"></i>
-    </span>
+    <span class="tab-close" data-id="${tab.id}"><i class="fa-solid fa-xmark"></i></span>
   `;
   el.addEventListener('click', e => {
     if (e.target.closest('.tab-close')) { closeTab(tab.id); return; }
@@ -418,359 +280,412 @@ function renderTabElement(tab) {
   tabBar.insertBefore(el, addTabBtn);
 }
 
-/**
- * Activate a tab — update UI and render its content.
- * @param {number} id
- */
 function activateTab(id) {
   activeTabId = id;
   document.querySelectorAll('.tab').forEach(t =>
     t.classList.toggle('active', +t.dataset.id === id)
   );
   dropZone.classList.add('hidden');
-  canvasArea.classList.remove('hidden');
-  sidebar.classList.add('visible');
-
-  const tab = getTab();
-  setScale(tab.scale, false);
-  renderPage();
+  pagesContainer.classList.remove('hidden');
+  renderAllPages();
+  updateHiPanel();
+  updateThumbHighlight();
 }
 
-/**
- * Close a tab and clean up.
- * @param {number} id
- */
 function closeTab(id) {
   const idx = tabs.findIndex(t => t.id === id);
   if (idx < 0) return;
-
-  // Revoke object URLs for local images
   const tab = tabs[idx];
-  if (tab.type === 'image' && tab.imgSrc && tab.imgSrc.startsWith('blob:')) {
-    URL.revokeObjectURL(tab.imgSrc);
-  }
-
+  if (tab.imgSrc?.startsWith('blob:')) URL.revokeObjectURL(tab.imgSrc);
   tabs.splice(idx, 1);
   document.querySelector(`.tab[data-id="${id}"]`)?.remove();
 
   if (tabs.length === 0) {
     activeTabId = null;
     dropZone.classList.remove('hidden');
-    canvasArea.classList.add('hidden');
-    sidebar.classList.remove('visible');
-    clearCanvases();
+    pagesContainer.classList.add('hidden');
+    pagesContainer.innerHTML = '';
+    thumbList.innerHTML = '';
+    thumbList.appendChild(thumbEmpty);
+    thumbEmpty.style.display = '';
+    updateHiPanel();
   } else {
-    activateTab(tabs[Math.min(idx, tabs.length - 1)].id);
+    activateTab(tabs[Math.min(idx, tabs.length-1)].id);
   }
 }
 
-/** @returns {TabState|null} Currently active tab */
-function getTab() {
-  return tabs.find(t => t.id === activeTabId) || null;
-}
+function getTab() { return tabs.find(t => t.id === activeTabId) || null; }
 
-/* ════════════════════════════════════════════
-   RENDERING
-   ════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════
+   CHROME-STYLE MULTI-PAGE RENDERING
+   Each page = its own set of 3 canvases
+   ═══════════════════════════════════════════ */
 
-/**
- * Render the current page of the active tab.
- * Cancels any in-progress render task first.
- */
-async function renderPage() {
+/** Render all pages of the active tab into pages-container */
+async function renderAllPages() {
   const tab = getTab();
   if (!tab) return;
 
-  // Cancel any in-flight render
-  if (currentRenderTask) {
-    try { currentRenderTask.cancel(); } catch (_) {}
-    currentRenderTask = null;
+  // Clear existing pages
+  pagesContainer.innerHTML = '';
+  pagesContainer.dataset.tabId = tab.id;
+
+  if (tab.type === 'image') {
+    renderImagePageEl(tab, 1);
+    return;
   }
 
-  if (tab.type === 'pdf') {
-    await renderPdfPage(tab);
-  } else {
-    renderImagePage(tab);
+  // PDF: render each page
+  for (let p = 1; p <= tab.totalPages; p++) {
+    renderPdfPageEl(tab, p);
   }
-
-  redrawHighlights();
-  updatePageLabel();
-  updateSidebar();
-  updateInfoPanel();
 }
 
-/**
- * Render a single PDF page onto the main canvas.
- * @param {TabState} tab
- */
-async function renderPdfPage(tab) {
+/** Create DOM structure for one PDF page and render it */
+async function renderPdfPageEl(tab, pageNum) {
+  // Create wrapper
+  const wrapper = document.createElement('div');
+  wrapper.className = 'page-wrapper';
+  wrapper.dataset.page = pageNum;
+
+  const shadow = document.createElement('div');
+  shadow.className = 'page-shadow';
+
+  const pdfC  = document.createElement('canvas');
+  const ovrC  = document.createElement('canvas');
+  const drawC = document.createElement('canvas');
+  ovrC.className  = 'overlay-canvas';
+  drawC.className = 'draw-canvas';
+
+  shadow.appendChild(pdfC);
+  shadow.appendChild(ovrC);
+  shadow.appendChild(drawC);
+
+  // Per-page toolbar
+  const ptb = document.createElement('div');
+  ptb.className = 'page-toolbar';
+  ptb.innerHTML = `
+    <button class="pg-rot-ccw" title="বামে ঘুরান"><i class="fa-solid fa-rotate-left"></i></button>
+    <span class="page-num-label">পেজ ${pageNum}</span>
+    <button class="pg-rot-cw" title="ডানে ঘুরান"><i class="fa-solid fa-rotate-right"></i></button>
+  `;
+  ptb.querySelector('.pg-rot-ccw').addEventListener('click', () => rotatePageEl(tab, pageNum, 'ccw', shadow, pdfC, ovrC, drawC));
+  ptb.querySelector('.pg-rot-cw').addEventListener('click',  () => rotatePageEl(tab, pageNum, 'cw',  shadow, pdfC, ovrC, drawC));
+
+  wrapper.appendChild(shadow);
+  wrapper.appendChild(ptb);
+  pagesContainer.appendChild(wrapper);
+
+  // Draw mode classes
+  updatePageCursor(shadow);
+
+  // Attach draw events
+  attachDrawEvents(tab, pageNum, shadow, pdfC, ovrC, drawC);
+
+  // Render
+  await renderPdfPage(tab, pageNum, pdfC, ovrC, drawC, shadow);
+}
+
+async function renderPdfPage(tab, pageNum, pdfC, ovrC, drawC, shadow) {
   try {
-    const page = await tab.pdfDoc.getPage(tab.currentPage);
-    const vp   = page.getViewport({ scale: tab.scale, rotation: tab.rotation });
+    const page = await tab.pdfDoc.getPage(pageNum);
+    const rot  = tab.getRotation(pageNum);
+    const scale = BASE_SCALE * zoomLevel;
+    const vp   = page.getViewport({ scale, rotation: rot });
 
-    setCanvasSize(vp.width, vp.height);
-    ctx.clearRect(0, 0, vp.width, vp.height);
+    [pdfC, ovrC, drawC].forEach(c => { c.width = vp.width; c.height = vp.height; });
+    shadow.style.width  = vp.width  + 'px';
+    shadow.style.height = vp.height + 'px';
 
+    const ctx = pdfC.getContext('2d');
     const renderTask = page.render({ canvasContext: ctx, viewport: vp });
-    currentRenderTask = renderTask;
     await renderTask.promise;
-    currentRenderTask = null;
-  } catch (e) {
+
+    redrawHighlightsOnCanvas(tab, pageNum, ovrC);
+  } catch(e) {
     if (e?.name === 'RenderingCancelledException') return;
-    console.error('[AnnotaPDF] Page render error:', e);
+    console.error('[render page]', e);
   }
 }
 
-/**
- * Render an image (with optional rotation) onto the main canvas.
- * @param {TabState} tab
- */
-function renderImagePage(tab) {
-  const { imgElement: img, scale: sc, rotation: rot } = tab;
-  const sw = img.naturalWidth;
-  const sh = img.naturalHeight;
+function renderImagePageEl(tab, pageNum) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'page-wrapper';
+  wrapper.dataset.page = pageNum;
 
-  const cw = (rot === 90 || rot === 270) ? sh * sc : sw * sc;
-  const ch = (rot === 90 || rot === 270) ? sw * sc : sh * sc;
+  const shadow = document.createElement('div');
+  shadow.className = 'page-shadow';
 
-  setCanvasSize(cw, ch);
+  const pdfC  = document.createElement('canvas');
+  const ovrC  = document.createElement('canvas');
+  const drawC = document.createElement('canvas');
+  ovrC.className  = 'overlay-canvas';
+  drawC.className = 'draw-canvas';
+
+  shadow.appendChild(pdfC);
+  shadow.appendChild(ovrC);
+  shadow.appendChild(drawC);
+
+  const ptb = document.createElement('div');
+  ptb.className = 'page-toolbar';
+  ptb.innerHTML = `
+    <button class="pg-rot-ccw" title="বামে ঘুরান"><i class="fa-solid fa-rotate-left"></i></button>
+    <span class="page-num-label">ইমেজ</span>
+    <button class="pg-rot-cw" title="ডানে ঘুরান"><i class="fa-solid fa-rotate-right"></i></button>
+  `;
+  ptb.querySelector('.pg-rot-ccw').addEventListener('click', () => rotatePageEl(tab, 1, 'ccw', shadow, pdfC, ovrC, drawC));
+  ptb.querySelector('.pg-rot-cw').addEventListener('click',  () => rotatePageEl(tab, 1, 'cw',  shadow, pdfC, ovrC, drawC));
+
+  wrapper.appendChild(shadow);
+  wrapper.appendChild(ptb);
+  pagesContainer.appendChild(wrapper);
+
+  updatePageCursor(shadow);
+  attachDrawEvents(tab, pageNum, shadow, pdfC, ovrC, drawC);
+  renderImageOnCanvas(tab, pdfC, ovrC, drawC, shadow);
+}
+
+function renderImageOnCanvas(tab, pdfC, ovrC, drawC, shadow) {
+  const img = tab.imgElement;
+  const rot = tab.getRotation(1);
+  const sc  = BASE_SCALE * zoomLevel;
+  const sw  = img.naturalWidth;
+  const sh  = img.naturalHeight;
+  const cw  = (rot===90||rot===270) ? sh*sc : sw*sc;
+  const ch  = (rot===90||rot===270) ? sw*sc : sh*sc;
+
+  [pdfC, ovrC, drawC].forEach(c => { c.width = cw; c.height = ch; });
+  shadow.style.width  = cw + 'px';
+  shadow.style.height = ch + 'px';
+
+  const ctx = pdfC.getContext('2d');
   ctx.clearRect(0, 0, cw, ch);
   ctx.save();
-  ctx.translate(cw / 2, ch / 2);
+  ctx.translate(cw/2, ch/2);
   ctx.rotate(rot * Math.PI / 180);
-  ctx.drawImage(img, -sw * sc / 2, -sh * sc / 2, sw * sc, sh * sc);
+  ctx.drawImage(img, -sw*sc/2, -sh*sc/2, sw*sc, sh*sc);
   ctx.restore();
+
+  redrawHighlightsOnCanvas(tab, 1, ovrC);
 }
 
-/**
- * Synchronise canvas element sizes and wrapper dimensions.
- * @param {number} w
- * @param {number} h
- */
-function setCanvasSize(w, h) {
-  [pdfCanvas, overlayCanvas, drawCanvas].forEach(c => {
-    c.width  = w;
-    c.height = h;
+/* Rotate a single page */
+async function rotatePageEl(tab, pageNum, dir, shadow, pdfC, ovrC, drawC) {
+  const oldRot = tab.getRotation(pageNum);
+  const newRot = (oldRot + (dir === 'cw' ? 90 : -90) + 360) % 360;
+
+  // Remap highlights for this page
+  const oldW = pdfC.width, oldH = pdfC.height;
+  tab.highlights = tab.highlights.map(h => {
+    if (h.page !== pageNum) return h;
+    let nx, ny, nw, nh;
+    if (dir === 'cw') {
+      nx = oldH - h.y - h.h; ny = h.x; nw = h.h; nh = h.w;
+    } else {
+      nx = h.y; ny = oldW - h.x - h.w; nw = h.h; nh = h.w;
+    }
+    return { ...h, x:nx, y:ny, w:nw, h:nh };
   });
-  canvasWrapper.style.width  = w + 'px';
-  canvasWrapper.style.height = h + 'px';
+
+  tab.setRotation(pageNum, newRot);
+
+  if (tab.type === 'pdf') {
+    await renderPdfPage(tab, pageNum, pdfC, ovrC, drawC, shadow);
+  } else {
+    renderImageOnCanvas(tab, pdfC, ovrC, drawC, shadow);
+  }
+  updateHiPanel();
+  markUnsaved(tab);
+  toast('<i class="fa-solid fa-rotate"></i> রোটেট হয়েছে');
 }
 
-/** Clear all three canvases */
-function clearCanvases() {
-  ctx.clearRect(0, 0, pdfCanvas.width, pdfCanvas.height);
-  octx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-  dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-}
-
-/* ════════════════════════════════════════════
-   HIGHLIGHT RENDERING
-   ════════════════════════════════════════════ */
-
-/**
- * Redraw all highlights for the current page onto the overlay canvas.
- * Uses multiply blend mode so text under highlights stays visible.
- */
-function redrawHighlights() {
-  const tab = getTab();
-  if (!tab) return;
-
-  octx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+/* Redraw all highlights for a page onto its overlay canvas */
+function redrawHighlightsOnCanvas(tab, pageNum, ovrC) {
+  const octx = ovrC.getContext('2d');
+  octx.clearRect(0, 0, ovrC.width, ovrC.height);
   tab.highlights
-    .filter(h => h.page === tab.currentPage)
+    .filter(h => h.page === pageNum)
     .forEach(h => {
       const c = COLOR_MAP[h.color];
-      octx.fillStyle = `rgba(${c.r},${c.g},${c.b},${h.opacity / 100})`;
+      octx.fillStyle = `rgba(${c.r},${c.g},${c.b},${h.opacity/100})`;
       octx.fillRect(h.x, h.y, h.w, h.h);
     });
 }
 
-/* ════════════════════════════════════════════
-   DRAWING INTERACTION
-   ════════════════════════════════════════════ */
-
-/**
- * Get the device-pixel ratio between CSS pixels and canvas pixels.
- * @returns {number}
- */
-function getCanvasScaleRatio() {
-  return pdfCanvas.width / pdfCanvas.getBoundingClientRect().width;
+/** Redraw highlights on all currently rendered pages */
+function redrawAllHighlights() {
+  const tab = getTab();
+  if (!tab) return;
+  pagesContainer.querySelectorAll('.page-wrapper').forEach(wrapper => {
+    const pageNum = +wrapper.dataset.page;
+    const ovrC = wrapper.querySelector('.overlay-canvas');
+    if (ovrC) redrawHighlightsOnCanvas(tab, pageNum, ovrC);
+  });
 }
 
-/**
- * Convert clientX/Y to canvas coordinates.
- * @param {number} clientX
- * @param {number} clientY
- * @returns {{x:number, y:number}}
- */
-function clientToCanvas(clientX, clientY) {
-  const rect = pdfCanvas.getBoundingClientRect();
-  const ratio = getCanvasScaleRatio();
-  return {
-    x: (clientX - rect.left)  * ratio,
-    y: (clientY - rect.top) * ratio,
+/* ═══════════════════════════════════════════
+   DRAWING INTERACTION (per canvas)
+   ═══════════════════════════════════════════ */
+let drawState = { active: false, startX:0, startY:0, pageNum:0, drawC:null, ovrC:null, pdfC:null, tab:null, panSX:0, panSY:0, scrollEl:null };
+
+function attachDrawEvents(tab, pageNum, shadow, pdfC, ovrC, drawC) {
+  const down = (e) => {
+    if (!activeTabId || activeTabId !== tab.id) return;
+    const pos = canvasPos(e, drawC);
+    if (drawMode === 'pan') {
+      drawState = { active:true, pageNum, drawC, ovrC, pdfC, tab,
+        panSX: e.clientX ?? e.touches[0].clientX, panSY: e.clientY ?? e.touches[0].clientY,
+        scrollEl: document.getElementById('pdf-viewer') };
+      shadow.classList.add('panning');
+    } else {
+      drawState = { active:true, startX:pos.x, startY:pos.y, pageNum, drawC, ovrC, pdfC, tab };
+    }
   };
+  const move = (e) => {
+    if (!drawState.active || drawState.tab !== tab || drawState.pageNum !== pageNum) return;
+    if (drawMode === 'pan') {
+      const cx = e.clientX ?? e.touches[0].clientX;
+      const cy = e.clientY ?? e.touches[0].clientY;
+      drawState.scrollEl.scrollLeft -= cx - drawState.panSX;
+      drawState.scrollEl.scrollTop  -= cy - drawState.panSY;
+      drawState.panSX = cx; drawState.panSY = cy;
+      return;
+    }
+    const pos = canvasPos(e, drawC);
+    const dctx = drawC.getContext('2d');
+    dctx.clearRect(0, 0, drawC.width, drawC.height);
+    const c = COLOR_MAP[activeColor];
+    dctx.fillStyle = `rgba(${c.r},${c.g},${c.b},${activeOpacity/100 * 0.5})`;
+    const x = Math.min(pos.x, drawState.startX);
+    const y = Math.min(pos.y, drawState.startY);
+    const w = Math.abs(pos.x - drawState.startX);
+    const h = Math.abs(pos.y - drawState.startY);
+    dctx.fillRect(x, y, w, h);
+  };
+  const up = (e) => {
+    if (!drawState.active || drawState.tab !== tab || drawState.pageNum !== pageNum) return;
+    shadow.classList.remove('panning');
+    if (drawMode === 'pan') { drawState.active = false; return; }
+    const pos = canvasPos(e, drawC);
+    const dctx = drawC.getContext('2d');
+    dctx.clearRect(0, 0, drawC.width, drawC.height);
+
+    const x = Math.min(pos.x, drawState.startX);
+    const y = Math.min(pos.y, drawState.startY);
+    const w = Math.abs(pos.x - drawState.startX);
+    const h = Math.abs(pos.y - drawState.startY);
+
+    if (drawMode === 'erase') {
+      eraseAt(tab, pageNum, x, y, w, h);
+      redrawHighlightsOnCanvas(tab, pageNum, ovrC);
+    } else if (drawMode === 'highlight' && w > MIN_HIGHLIGHT && h > MIN_HIGHLIGHT) {
+      pushHistory(tab);
+      const hl = { id: Date.now(), page:pageNum, x, y, w, h, color:activeColor, opacity:activeOpacity };
+      tab.highlights.push(hl);
+      redrawHighlightsOnCanvas(tab, pageNum, ovrC);
+      updateHiPanel();
+      markUnsaved(tab);
+      scheduleAutoSave(tab);
+    }
+    drawState.active = false;
+  };
+
+  // Mouse
+  drawC.addEventListener('mousedown',  down);
+  drawC.addEventListener('mousemove',  move);
+  drawC.addEventListener('mouseup',    up);
+  drawC.addEventListener('mouseleave', () => {
+    if (drawState.active && drawState.pageNum === pageNum) {
+      if (drawMode !== 'pan') {
+        const dctx = drawC.getContext('2d');
+        dctx.clearRect(0, 0, drawC.width, drawC.height);
+      }
+      drawState.active = false;
+    }
+  });
+
+  // Touch
+  drawC.addEventListener('touchstart', e => { e.preventDefault(); down(e.touches[0]); }, { passive:false });
+  drawC.addEventListener('touchmove',  e => { e.preventDefault(); move(e.touches[0]); }, { passive:false });
+  drawC.addEventListener('touchend',   e => { e.preventDefault(); up(e.changedTouches[0]); }, { passive:false });
 }
 
-// Mouse events
-canvasWrapper.addEventListener('mousedown',  onPointerDown);
-canvasWrapper.addEventListener('mousemove',  onPointerMove);
-canvasWrapper.addEventListener('mouseup',    onPointerUp);
-canvasWrapper.addEventListener('mouseleave', () => {
-  if (isDrawing) {
-    isDrawing = false;
-    dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+function canvasPos(e, canvas) {
+  const rect  = canvas.getBoundingClientRect();
+  const ratio = canvas.width / rect.width;
+  const clientX = e.clientX ?? (e.touches && e.touches[0].clientX);
+  const clientY = e.clientY ?? (e.touches && e.touches[0].clientY);
+  return { x: (clientX - rect.left) * ratio, y: (clientY - rect.top) * ratio };
+}
+
+function eraseAt(tab, pageNum, x, y, w, h) {
+  const pad = 20;
+  pushHistory(tab);
+  tab.highlights = tab.highlights.filter(h => {
+    if (h.page !== pageNum) return true;
+    const ox = Math.max(h.x, x-pad), oy = Math.max(h.y, y-pad);
+    const ox2 = Math.min(h.x+h.w, x+w+pad), oy2 = Math.min(h.y+h.h, y+h+pad);
+    return ox >= ox2 || oy >= oy2;
+  });
+  updateHiPanel();
+  markUnsaved(tab);
+}
+
+function updatePageCursor(shadow) {
+  shadow.classList.remove('mode-pan', 'mode-erase');
+  if (drawMode === 'pan')   shadow.classList.add('mode-pan');
+  if (drawMode === 'erase') shadow.classList.add('mode-erase');
+}
+
+function updateAllCursors() {
+  pagesContainer.querySelectorAll('.page-shadow').forEach(s => updatePageCursor(s));
+}
+
+/* ═══════════════════════════════════════════
+   ZOOM
+   ═══════════════════════════════════════════ */
+function setZoom(newZoom) {
+  const tab = getTab();
+  newZoom = Math.max(0.25, Math.min(5, newZoom));
+  const ratio = newZoom / zoomLevel;
+  zoomLevel = newZoom;
+  zoomLabelBtn.textContent = Math.round(newZoom * 100) + '%';
+
+  // Remap highlights
+  if (tab) {
+    tab.highlights = tab.highlights.map(h => ({
+      ...h, x:h.x*ratio, y:h.y*ratio, w:h.w*ratio, h:h.h*ratio
+    }));
   }
+  renderAllPages();
+}
+
+document.getElementById('zoom-in').addEventListener('click',  () => setZoom(zoomLevel + 0.25));
+document.getElementById('zoom-out').addEventListener('click', () => setZoom(zoomLevel - 0.25));
+zoomLabelBtn.addEventListener('click', async () => {
+  // Fit to viewer width
+  const viewer = document.getElementById('pdf-viewer');
+  const tab = getTab();
+  if (!tab) return;
+  const availW = viewer.clientWidth - 64;
+  let naturalW;
+  if (tab.type === 'pdf') {
+    const page = await tab.pdfDoc.getPage(1);
+    naturalW = page.getViewport({ scale:1, rotation: tab.getRotation(1) }).width;
+  } else {
+    const r = tab.getRotation(1);
+    naturalW = (r===90||r===270) ? tab.imgElement.naturalHeight : tab.imgElement.naturalWidth;
+  }
+  setZoom((availW / naturalW) / BASE_SCALE);
 });
 
-// Touch events
-canvasWrapper.addEventListener('touchstart', e => {
-  e.preventDefault();
-  const t = e.touches[0];
-  onPointerDown({ clientX: t.clientX, clientY: t.clientY });
-}, { passive: false });
-
-canvasWrapper.addEventListener('touchmove', e => {
-  e.preventDefault();
-  const t = e.touches[0];
-  onPointerMove({ clientX: t.clientX, clientY: t.clientY });
-}, { passive: false });
-
-canvasWrapper.addEventListener('touchend', e => {
-  e.preventDefault();
-  const t = e.changedTouches[0];
-  onPointerUp({ clientX: t.clientX, clientY: t.clientY });
-}, { passive: false });
-
-function onPointerDown(e) {
-  if (!activeTabId) return;
-  const pos = clientToCanvas(e.clientX, e.clientY);
-  startX    = pos.x;
-  startY    = pos.y;
-  isDrawing = true;
-
-  if (drawMode === 'pan') {
-    panStartX  = e.clientX;
-    panStartY  = e.clientY;
-    panScrollX = canvasArea.scrollLeft;
-    panScrollY = canvasArea.scrollTop;
-  }
-  dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-}
-
-function onPointerMove(e) {
-  if (!isDrawing) return;
-  const pos = clientToCanvas(e.clientX, e.clientY);
-
-  if (drawMode === 'pan') {
-    canvasArea.scrollLeft = panScrollX - (e.clientX - panStartX);
-    canvasArea.scrollTop  = panScrollY - (e.clientY - panStartY);
-    return;
-  }
-
-  if (drawMode === 'highlight') {
-    const x = Math.min(startX, pos.x);
-    const y = Math.min(startY, pos.y);
-    const w = Math.abs(pos.x - startX);
-    const h = Math.abs(pos.y - startY);
-
-    dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-
-    const c = COLOR_MAP[activeColor];
-    dctx.fillStyle   = `rgba(${c.r},${c.g},${c.b},${activeOpacity / 100})`;
-    dctx.fillRect(x, y, w, h);
-
-    dctx.strokeStyle = c.hex;
-    dctx.lineWidth   = 1.5;
-    dctx.setLineDash([6, 3]);
-    dctx.strokeRect(x, y, w, h);
-    dctx.setLineDash([]);
-  }
-
-  if (drawMode === 'erase') {
-    eraseAt(pos.x, pos.y);
-  }
-}
-
-function onPointerUp(e) {
-  if (!isDrawing) return;
-  isDrawing = false;
-  dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-
-  if (drawMode === 'pan' || drawMode === 'erase') return;
-
-  const tab = getTab();
-  if (!tab) return;
-
-  const pos = clientToCanvas(e.clientX, e.clientY);
-  const x   = Math.min(startX, pos.x);
-  const y   = Math.min(startY, pos.y);
-  const w   = Math.abs(pos.x - startX);
-  const h   = Math.abs(pos.y - startY);
-
-  if (w < MIN_HIGHLIGHT_PX || h < MIN_HIGHLIGHT_PX) return;
-
-  pushHistory(tab);
-  tab.highlights.push({
-    id:      Date.now(),
-    page:    tab.currentPage,
-    x, y, w, h,
-    color:   activeColor,
-    opacity: activeOpacity,
-  });
-
-  redrawHighlights();
-  updateSidebar();
-  toast('<i class="fa-solid fa-highlighter"></i> হাইলাইট যোগ হয়েছে');
-}
-
-/**
- * Erase any highlight whose bounding box contains the given point.
- * @param {number} cx  Canvas X
- * @param {number} cy  Canvas Y
- */
-function eraseAt(cx, cy) {
-  const tab = getTab();
-  if (!tab) return;
-
-  const before = tab.highlights.length;
-  tab.highlights = tab.highlights.filter(h => {
-    if (h.page !== tab.currentPage) return true;
-    return !(cx >= h.x && cx <= h.x + h.w && cy >= h.y && cy <= h.y + h.h);
-  });
-
-  if (tab.highlights.length < before) {
-    redrawHighlights();
-    updateSidebar();
-  }
-}
-
-/**
- * Delete a specific highlight by its ID.
- * @param {number} id
- */
-function deleteHighlight(id) {
-  const tab = getTab();
-  if (!tab) return;
-  pushHistory(tab);
-  tab.highlights = tab.highlights.filter(h => h.id !== id);
-  redrawHighlights();
-  updateSidebar();
-  toast('<i class="fa-solid fa-trash-can"></i> হাইলাইট মুছা হয়েছে');
-}
-
-/* ════════════════════════════════════════════
+/* ═══════════════════════════════════════════
    UNDO / REDO
-   ════════════════════════════════════════════ */
-
-/**
- * Push a deep clone of current highlights onto the undo stack.
- * @param {TabState} tab
- */
+   ═══════════════════════════════════════════ */
 function pushHistory(tab) {
   tab.history.push(JSON.parse(JSON.stringify(tab.highlights)));
   tab.future = [];
-  if (tab.history.length > MAX_HISTORY_STEPS) tab.history.shift();
+  if (tab.history.length > MAX_HISTORY) tab.history.shift();
 }
 
 function undo() {
@@ -778,8 +693,8 @@ function undo() {
   if (!tab || !tab.history.length) return;
   tab.future.push(JSON.parse(JSON.stringify(tab.highlights)));
   tab.highlights = tab.history.pop();
-  redrawHighlights();
-  updateSidebar();
+  redrawAllHighlights();
+  updateHiPanel();
   toast('<i class="fa-solid fa-rotate-left"></i> আনডু');
 }
 
@@ -788,247 +703,74 @@ function redo() {
   if (!tab || !tab.future.length) return;
   tab.history.push(JSON.parse(JSON.stringify(tab.highlights)));
   tab.highlights = tab.future.pop();
-  redrawHighlights();
-  updateSidebar();
+  redrawAllHighlights();
+  updateHiPanel();
   toast('<i class="fa-solid fa-rotate-right"></i> রিডু');
 }
 
-/* ════════════════════════════════════════════
-   ZOOM
-   ════════════════════════════════════════════ */
+document.getElementById('undo-btn').addEventListener('click', undo);
+document.getElementById('redo-btn').addEventListener('click', redo);
 
-/**
- * Change render scale, proportionally mapping existing highlight coords.
- * @param {number} newScale
- * @param {boolean} [rerender=true]
- */
-function setScale(newScale, rerender = true) {
-  const tab = getTab();
-  if (!tab) return;
-
-  const ratio = newScale / tab.scale;
-  tab.highlights = tab.highlights.map(h => ({
-    ...h,
-    x: h.x * ratio,
-    y: h.y * ratio,
-    w: h.w * ratio,
-    h: h.h * ratio,
-  }));
-
-  tab.scale = newScale;
-  zoomLabel.textContent = Math.round(newScale / tab.baseScale * 100) + '%';
-  if (rerender) renderPage();
-}
-
-document.getElementById('zoom-in').addEventListener('click', () => {
-  const tab = getTab(); if (!tab) return;
-  setScale(Math.min(tab.scale + 0.25, 5));
-});
-
-document.getElementById('zoom-out').addEventListener('click', () => {
-  const tab = getTab(); if (!tab) return;
-  setScale(Math.max(tab.scale - 0.25, 0.25));
-});
-
-document.getElementById('zoom-fit').addEventListener('click', async () => {
-  const tab = getTab(); if (!tab) return;
-  const areaW = canvasArea.clientWidth - 48;
-  let naturalW;
-
-  if (tab.type === 'pdf') {
-    const page = await tab.pdfDoc.getPage(tab.currentPage);
-    const vp   = page.getViewport({ scale: 1, rotation: tab.rotation });
-    naturalW   = vp.width;
-  } else {
-    const r = tab.rotation;
-    naturalW = (r === 90 || r === 270)
-      ? tab.imgElement.naturalHeight
-      : tab.imgElement.naturalWidth;
-  }
-
-  const fit = areaW / naturalW;
-  tab.baseScale = fit;
-  setScale(fit);
-});
-
-/* ════════════════════════════════════════════
-   ROTATION
-   ════════════════════════════════════════════ */
-
-/**
- * Rotate the document and remap highlight coordinates.
- * @param {'cw'|'ccw'} dir
- */
-async function rotate(dir) {
-  const tab = getTab();
-  if (!tab) return;
-
-  const oldW = pdfCanvas.width;
-  const oldH = pdfCanvas.height;
-  tab.rotation = (tab.rotation + (dir === 'cw' ? 90 : -90) + 360) % 360;
-
-  tab.highlights = tab.highlights.map(h => {
-    let nx, ny, nw, nh;
-    if (dir === 'cw') {
-      nx = oldH - h.y - h.h;
-      ny = h.x;
-      nw = h.h;
-      nh = h.w;
-    } else {
-      nx = h.y;
-      ny = oldW - h.x - h.w;
-      nw = h.h;
-      nh = h.w;
-    }
-    return { ...h, x: nx, y: ny, w: nw, h: nh };
-  });
-
-  await renderPage();
-  toast('<i class="fa-solid fa-rotate"></i> রোটেট করা হয়েছে');
-}
-
-document.getElementById('rot-cw').addEventListener('click',  () => rotate('cw'));
-document.getElementById('rot-ccw').addEventListener('click', () => rotate('ccw'));
-
-/* ════════════════════════════════════════════
-   PAGE NAVIGATION
-   ════════════════════════════════════════════ */
-
-function updatePageLabel() {
-  const tab = getTab();
-  if (!tab) {
-    pageLabel.textContent = '— / —';
-    return;
-  }
-  pageLabel.textContent = `${tab.currentPage} / ${tab.totalPages}`;
-  document.getElementById('prev-page').disabled = tab.currentPage <= 1;
-  document.getElementById('next-page').disabled = tab.currentPage >= tab.totalPages;
-}
-
-// Click page label → jump to page dialog
-pageLabel.addEventListener('click', () => {
-  const tab = getTab();
-  if (!tab || tab.totalPages <= 1) return;
-
-  const input = prompt(`পেজ নম্বর লিখুন (১ – ${tab.totalPages}):`, tab.currentPage);
-  if (input === null) return;
-
-  const n = parseInt(input, 10);
-  if (isNaN(n) || n < 1 || n > tab.totalPages) {
-    toast('<i class="fa-solid fa-triangle-exclamation"></i> অবৈধ পেজ নম্বর', 'error');
-    return;
-  }
-  tab.currentPage = n;
-  setLoadBar(0);
-  renderPage().then(() => setLoadBar(100));
-});
-
-document.getElementById('prev-page').addEventListener('click', async () => {
-  const tab = getTab(); if (!tab || tab.currentPage <= 1) return;
-  tab.currentPage--;
-  setLoadBar(0);
-  await renderPage();
-  setLoadBar(100);
-});
-
-document.getElementById('next-page').addEventListener('click', async () => {
-  const tab = getTab(); if (!tab || tab.currentPage >= tab.totalPages) return;
-  tab.currentPage++;
-  setLoadBar(0);
-  await renderPage();
-  setLoadBar(100);
-});
-
-/* ════════════════════════════════════════════
+/* ═══════════════════════════════════════════
    SAVE / EXPORT
-   ════════════════════════════════════════════ */
-
-/** Entry point — route to PDF or image saver. */
+   ═══════════════════════════════════════════ */
 async function saveFile() {
   const tab = getTab();
-  if (!tab) {
-    toast('<i class="fa-solid fa-triangle-exclamation"></i> কোনো ফাইল খোলা নেই', 'error');
-    return;
-  }
-  if (tab.type === 'image') saveImageFile(tab);
+  if (!tab) { toast('কোনো ফাইল খোলা নেই', 'error'); return; }
+  if (tab.type === 'image') await saveImageFile(tab);
   else                      await savePdfFile(tab);
 }
 
-/**
- * Export image file as a high-resolution PNG.
- * @param {TabState} tab
- */
-function saveImageFile(tab) {
-  const out  = document.createElement('canvas');
-  out.width  = pdfCanvas.width;
-  out.height = pdfCanvas.height;
+async function saveImageFile(tab) {
+  const ovrC  = pagesContainer.querySelector('.page-wrapper .overlay-canvas');
+  const pdfC  = pagesContainer.querySelector('.page-wrapper canvas:first-child');
+  if (!pdfC) return;
+  const out = document.createElement('canvas');
+  out.width = pdfC.width; out.height = pdfC.height;
   const mctx = out.getContext('2d');
-
-  mctx.drawImage(pdfCanvas, 0, 0);
+  mctx.drawImage(pdfC, 0, 0);
   mctx.globalCompositeOperation = 'multiply';
-
-  tab.highlights
-    .filter(h => h.page === tab.currentPage)
-    .forEach(h => {
-      const c = COLOR_MAP[h.color];
-      mctx.fillStyle = `rgba(${c.r},${c.g},${c.b},${h.opacity / 100})`;
-      mctx.fillRect(h.x, h.y, h.w, h.h);
-    });
-
+  if (ovrC) mctx.drawImage(ovrC, 0, 0);
   mctx.globalCompositeOperation = 'source-over';
-
-  const a      = document.createElement('a');
-  a.download   = tab.name.replace(/\.[^.]+$/, '') + '-highlighted.png';
-  a.href       = out.toDataURL('image/png');
+  const a = document.createElement('a');
+  a.download = tab.name.replace(/\.[^.]+$/, '') + '-highlighted.png';
+  a.href = out.toDataURL('image/png');
   a.click();
-
-  toast('<i class="fa-solid fa-floppy-disk"></i> ইমেজ ডাউনলোড হচ্ছে...', 'success');
+  toast('ইমেজ ডাউনলোড হচ্ছে...', 'success');
+  tab.unsaved = false;
+  markUnsaved(tab, false);
 }
 
-/**
- * Export PDF with all highlights baked in at high resolution.
- * @param {TabState} tab
- */
 async function savePdfFile(tab) {
   toast('<i class="fa-solid fa-spinner fa-spin"></i> PDF তৈরি হচ্ছে...');
   setLoadBar(0);
-
   try {
     const { jsPDF } = window.jspdf;
-    let pdf       = null;
-    let firstPage = true;
+    let pdf = null; let firstPage = true;
 
-    for (let pageNum = 1; pageNum <= tab.totalPages; pageNum++) {
-      setLoadBar(Math.round((pageNum / tab.totalPages) * 90));
+    for (let p = 1; p <= tab.totalPages; p++) {
+      setLoadBar(Math.round(p / tab.totalPages * 90));
+      const page = await tab.pdfDoc.getPage(p);
+      const rot  = tab.getRotation(p);
+      const vp   = page.getViewport({ scale: SAVE_SCALE, rotation: rot });
 
-      const page = await tab.pdfDoc.getPage(pageNum);
-      const vp   = page.getViewport({ scale: SAVE_RENDER_SCALE, rotation: tab.rotation });
-
-      // Render page
-      const tc   = document.createElement('canvas');
-      tc.width   = vp.width;
-      tc.height  = vp.height;
+      const tc = document.createElement('canvas');
+      tc.width = vp.width; tc.height = vp.height;
       const tctx = tc.getContext('2d');
       await page.render({ canvasContext: tctx, viewport: vp }).promise;
 
-      // Bake highlights for this page
       tctx.globalCompositeOperation = 'multiply';
-      const ratio = SAVE_RENDER_SCALE / tab.scale;
-
-      tab.highlights
-        .filter(h => h.page === pageNum)
-        .forEach(h => {
-          const c = COLOR_MAP[h.color];
-          tctx.fillStyle = `rgba(${c.r},${c.g},${c.b},${h.opacity / 100})`;
-          tctx.fillRect(h.x * ratio, h.y * ratio, h.w * ratio, h.h * ratio);
-        });
-
+      const ratio = SAVE_SCALE / (BASE_SCALE * zoomLevel);
+      tab.highlights.filter(h => h.page === p).forEach(h => {
+        const c = COLOR_MAP[h.color];
+        tctx.fillStyle = `rgba(${c.r},${c.g},${c.b},${h.opacity/100})`;
+        tctx.fillRect(h.x*ratio, h.y*ratio, h.w*ratio, h.h*ratio);
+      });
       tctx.globalCompositeOperation = 'source-over';
 
-      // Convert to image and add to PDF
       const imgData = tc.toDataURL('image/jpeg', 0.97);
-      const mmW     = vp.width  * 0.264583;  // px → mm at 96 dpi
-      const mmH     = vp.height * 0.264583;
+      const mmW = vp.width  * 0.264583;
+      const mmH = vp.height * 0.264583;
 
       if (firstPage) {
         pdf = new jsPDF({ orientation: mmW > mmH ? 'l' : 'p', unit: 'mm', format: [mmW, mmH] });
@@ -1036,156 +778,277 @@ async function savePdfFile(tab) {
       } else {
         pdf.addPage([mmW, mmH], mmW > mmH ? 'l' : 'p');
       }
-
       pdf.addImage(imgData, 'JPEG', 0, 0, mmW, mmH);
     }
 
     setLoadBar(100);
     pdf.save(tab.name.replace(/\.pdf$/i, '') + '-highlighted.pdf');
-    toast('<i class="fa-solid fa-circle-check"></i> PDF সেভ হয়েছে', 'success');
-  } catch (e) {
+    toast('PDF সেভ হয়েছে', 'success');
+    tab.unsaved = false;
+    markUnsaved(tab, false);
+  } catch(e) {
     setLoadBar(100);
-    console.error('[AnnotaPDF] PDF save error:', e);
-    toast('<i class="fa-solid fa-circle-xmark"></i> PDF সেভ ব্যর্থ: ' + e.message, 'error');
+    console.error(e);
+    toast('PDF সেভ ব্যর্থ: ' + e.message, 'error');
   }
 }
 
-/* ════════════════════════════════════════════
-   SIDEBAR & INFO PANEL
-   ════════════════════════════════════════════ */
-
-/** Refresh the highlight list in the sidebar. */
-function updateSidebar() {
-  const tab    = getTab();
-  const onPage = tab ? tab.highlights.filter(h => h.page === tab.currentPage) : [];
-
-  hiCountBadge.textContent = tab ? tab.highlights.length : 0;
-
-  if (!onPage.length) {
-    hiList.innerHTML  = '';
-    hiEmpty.style.display = 'block';
-  } else {
-    hiEmpty.style.display = 'none';
-    hiList.innerHTML = onPage.map((h, i) => `
-      <div class="hi-item" onclick="jumpToHighlight(${h.id})">
-        <div class="hi-dot" style="background:${COLOR_MAP[h.color].hex}"></div>
-        <div class="hi-meta">
-          <div class="hi-label">হাইলাইট ${i + 1}</div>
-          <div class="hi-sub">পেজ ${h.page} · ${Math.round(h.w)}×${Math.round(h.h)}px</div>
-        </div>
-        <button class="hi-del" onclick="event.stopPropagation(); deleteHighlight(${h.id})" title="মুছুন">
-          <i class="fa-solid fa-xmark"></i>
-        </button>
-      </div>
-    `).join('');
-  }
-
-  updateMobileSidebar();
+/* ── AUTO-SAVE ── */
+let autoSaveTimer = null;
+function scheduleAutoSave(tab) {
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(() => autoSave(tab), 3000);
 }
 
-/**
- * Scroll the canvas to a specific highlight.
- * @param {number} id
- */
-function jumpToHighlight(id) {
-  const tab = getTab(); if (!tab) return;
-  const h   = tab.highlights.find(x => x.id === id);
-  if (!h) return;
-
-  const ratio   = pdfCanvas.getBoundingClientRect().width / pdfCanvas.width;
-  const scrollX = (h.x + h.w / 2) * ratio - canvasArea.clientWidth  / 2;
-  const scrollY = (h.y + h.h / 2) * ratio - canvasArea.clientHeight / 2;
-
-  canvasArea.scrollTo({ left: scrollX, top: scrollY, behavior: 'smooth' });
+async function autoSave(tab) {
+  // Only auto-save PDFs (images are saved on demand)
+  if (tab.type !== 'pdf' || !tab.pdfDoc) return;
+  // Silent save — no toast
+  try {
+    const { jsPDF } = window.jspdf;
+    let pdf = null; let firstPage = true;
+    for (let p = 1; p <= tab.totalPages; p++) {
+      const page = await tab.pdfDoc.getPage(p);
+      const rot  = tab.getRotation(p);
+      const vp   = page.getViewport({ scale: SAVE_SCALE, rotation: rot });
+      const tc = document.createElement('canvas');
+      tc.width = vp.width; tc.height = vp.height;
+      const tctx = tc.getContext('2d');
+      await page.render({ canvasContext: tctx, viewport: vp }).promise;
+      tctx.globalCompositeOperation = 'multiply';
+      const ratio = SAVE_SCALE / (BASE_SCALE * zoomLevel);
+      tab.highlights.filter(h => h.page === p).forEach(h => {
+        const c = COLOR_MAP[h.color];
+        tctx.fillStyle = `rgba(${c.r},${c.g},${c.b},${h.opacity/100})`;
+        tctx.fillRect(h.x*ratio, h.y*ratio, h.w*ratio, h.h*ratio);
+      });
+      tctx.globalCompositeOperation = 'source-over';
+      const imgData = tc.toDataURL('image/jpeg', 0.95);
+      const mmW = vp.width*0.264583, mmH = vp.height*0.264583;
+      if (firstPage) {
+        pdf = new jsPDF({ orientation: mmW>mmH?'l':'p', unit:'mm', format:[mmW,mmH] });
+        firstPage = false;
+      } else { pdf.addPage([mmW,mmH], mmW>mmH?'l':'p'); }
+      pdf.addImage(imgData,'JPEG',0,0,mmW,mmH);
+    }
+    // Save as blob to localStorage as base64 (no file system needed)
+    const pdfBlob = pdf.output('blob');
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        localStorage.setItem(`annotapdf_autosave_${tab.id}`, JSON.stringify({
+          name: tab.name.replace(/\.pdf$/i,'')+'-autosave.pdf',
+          data: reader.result,
+          ts: Date.now()
+        }));
+        markUnsaved(tab, false);
+        showAutoSaveIndicator();
+      } catch(_) {}  // localStorage might be full
+    };
+    reader.readAsDataURL(pdfBlob);
+  } catch(e) { console.error('[auto-save]', e); }
 }
 
-/** Refresh the info panel in the sidebar. */
-function updateInfoPanel() {
-  const tab = getTab();
-  if (!tab) { infoContent.innerHTML = ''; return; }
-
-  const zoomPct = Math.round(tab.scale / tab.baseScale * 100);
-  const rows = [
-    ['fa-file',          'নাম',      tab.name.length > 22 ? tab.name.slice(0, 20) + '…' : tab.name],
-    ['fa-tag',           'ধরন',      tab.type === 'pdf' ? 'PDF' : 'ইমেজ'],
-    ['fa-book-open',     'পেজ',      `${tab.currentPage} / ${tab.totalPages}`],
-    ['fa-magnifying-glass','জুম',    zoomPct + '%'],
-    ['fa-rotate',        'রোটেশন',  tab.rotation + '°'],
-    ['fa-highlighter',   'হাইলাইট', tab.highlights.length + 'টি'],
-    ['fa-layer-group',   'এই পেজে', tab.highlights.filter(h => h.page === tab.currentPage).length + 'টি'],
-  ];
-
-  infoContent.innerHTML = rows.map(([icon, k, v]) => `
-    <div class="info-row">
-      <span class="info-key"><i class="fa-solid ${icon}"></i>${k}</span>
-      <span class="info-val">${v}</span>
-    </div>
-  `).join('');
+function showAutoSaveIndicator() {
+  const el = document.getElementById('toast');
+  el.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> স্বয়ংক্রিয় সেভ হয়েছে';
+  el.className = 'show';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = ''; }, 1800);
 }
 
-/** Refresh the mobile sidebar sheet. */
-function updateMobileSidebar() {
-  const tab = getTab();
-  const ms  = document.getElementById('mobile-sb-content');
-  if (!ms) return;
+function markUnsaved(tab, unsaved = true) {
+  tab.unsaved = unsaved;
+  const tabEl = document.querySelector(`.tab[data-id="${tab.id}"]`);
+  if (tabEl) tabEl.classList.toggle('tab-unsaved', unsaved);
+}
 
-  const onPage = tab ? tab.highlights.filter(h => h.page === tab.currentPage) : [];
+/* ═══════════════════════════════════════════
+   THUMBNAILS
+   ═══════════════════════════════════════════ */
+async function autoLoadThumbs(tab) {
+  thumbEmpty.style.display = 'none';
+  // Remove old thumbs
+  thumbList.querySelectorAll('.thumb-item').forEach(e => e.remove());
 
-  if (!onPage.length) {
-    ms.innerHTML = `
-      <div class="empty-state">
-        <i class="fa-solid fa-highlighter empty-icon"></i>
-        এখনো হাইলাইট নেই।
-      </div>`;
+  if (tab.type === 'image') {
+    addThumbItem(tab, 1, async (c) => {
+      const img = tab.imgElement;
+      const sc  = c.width / img.naturalWidth;
+      c.height  = img.naturalHeight * sc;
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    });
     return;
   }
 
-  ms.innerHTML = onPage.map((h, i) => `
-    <div class="hi-item">
-      <div class="hi-dot" style="background:${COLOR_MAP[h.color].hex}"></div>
-      <div class="hi-meta">
-        <div class="hi-label">হাইলাইট ${i + 1}</div>
-        <div class="hi-sub">পেজ ${h.page}</div>
-      </div>
-      <button class="hi-del" onclick="deleteHighlight(${h.id}); closeMobileModal()">
-        <i class="fa-solid fa-xmark"></i>
-      </button>
-    </div>
-  `).join('');
+  for (let p = 1; p <= tab.totalPages; p++) {
+    addThumbItem(tab, p, async (c) => {
+      const page = await tab.pdfDoc.getPage(p);
+      const rot  = tab.getRotation(p);
+      const vp   = page.getViewport({ scale: 0.3, rotation: rot });
+      c.width  = vp.width;
+      c.height = vp.height;
+      await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+    });
+  }
 }
 
-/* ════════════════════════════════════════════
-   SIDEBAR TAB SWITCHING
-   ════════════════════════════════════════════ */
-document.querySelectorAll('.sb-tab').forEach(t => {
-  t.addEventListener('click', () => {
-    document.querySelectorAll('.sb-tab').forEach(x => x.classList.remove('active'));
-    document.querySelectorAll('.sb-panel').forEach(x => x.classList.remove('active'));
-    t.classList.add('active');
-    document.getElementById(t.dataset.panel).classList.add('active');
-    if (t.dataset.panel === 'info-panel') updateInfoPanel();
+function addThumbItem(tab, pageNum, renderFn) {
+  const item = document.createElement('div');
+  item.className = 'thumb-item';
+  item.dataset.page = pageNum;
+
+  const c = document.createElement('canvas');
+  c.width = 156;
+
+  const num = document.createElement('div');
+  num.className = 'thumb-page-num';
+  num.textContent = pageNum;
+
+  const rotBtn = document.createElement('button');
+  rotBtn.className = 'thumb-rot-btn';
+  rotBtn.title = 'ঘুরান';
+  rotBtn.innerHTML = '<i class="fa-solid fa-rotate-right"></i>';
+
+  item.appendChild(c);
+  item.appendChild(num);
+  item.appendChild(rotBtn);
+  thumbList.appendChild(item);
+
+  renderFn(c).catch(() => {});
+
+  item.addEventListener('click', e => {
+    if (e.target.closest('.thumb-rot-btn')) return;
+    // Scroll to that page
+    const wrapper = pagesContainer.querySelector(`.page-wrapper[data-page="${pageNum}"]`);
+    if (wrapper) wrapper.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+
+  rotBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const wrapper = pagesContainer.querySelector(`.page-wrapper[data-page="${pageNum}"]`);
+    if (wrapper) {
+      const pdfC  = wrapper.querySelector('canvas:first-child');
+      const ovrC  = wrapper.querySelector('.overlay-canvas');
+      const drawC = wrapper.querySelector('.draw-canvas');
+      const shadow = wrapper.querySelector('.page-shadow');
+      await rotatePageEl(tab, pageNum, 'cw', shadow, pdfC, ovrC, drawC);
+      // Re-render thumb
+      const rot = tab.getRotation(pageNum);
+      const vp  = (await tab.pdfDoc?.getPage(pageNum))?.getViewport({ scale:0.3, rotation:rot });
+      if (vp) { c.width = vp.width; c.height = vp.height; (await tab.pdfDoc.getPage(pageNum)).render({ canvasContext: c.getContext('2d'), viewport: vp }); }
+    }
+  });
+}
+
+function updateThumbHighlight() {
+  thumbList.querySelectorAll('.thumb-item').forEach(item => {
+    item.classList.toggle('active', false); // could scroll-sync
+  });
+}
+
+/* ═══════════════════════════════════════════
+   HIGHLIGHTS PANEL
+   ═══════════════════════════════════════════ */
+function updateHiPanel() {
+  const tab = getTab();
+  const all = tab ? tab.highlights : [];
+
+  hiCount.textContent = all.length;
+
+  if (!all.length) {
+    hiList.innerHTML = '';
+    hiList.appendChild(hiEmpty);
+    hiEmpty.style.display = '';
+    return;
+  }
+
+  hiEmpty.style.display = 'none';
+
+  // Group by page
+  const byPage = {};
+  all.forEach(h => { (byPage[h.page] = byPage[h.page]||[]).push(h); });
+
+  let html = '';
+  Object.keys(byPage).sort((a,b)=>+a-+b).forEach(pg => {
+    if (tab.totalPages > 1) {
+      html += `<div style="font-size:11px;color:#888;padding:6px 10px 2px;font-weight:600">পেজ ${pg}</div>`;
+    }
+    byPage[pg].forEach((h, i) => {
+      const c = COLOR_MAP[h.color];
+      html += `
+      <div class="hi-item" onclick="jumpToHighlight(${h.id})">
+        <div class="hi-dot" style="background:${c.hex}"></div>
+        <div class="hi-meta">
+          <div class="hi-label">হাইলাইট ${i+1}</div>
+          <div class="hi-sub">${Math.round(h.w)}×${Math.round(h.h)}px</div>
+        </div>
+        <button class="hi-del" onclick="event.stopPropagation();deleteHighlight(${h.id})" title="মুছুন">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>`;
+    });
+  });
+
+  hiList.innerHTML = html;
+  hiList.appendChild(hiEmpty); // keep in DOM
+  hiEmpty.style.display = 'none';
+}
+
+function jumpToHighlight(id) {
+  const tab = getTab(); if (!tab) return;
+  const h   = tab.highlights.find(x => x.id === id); if (!h) return;
+  const wrapper = pagesContainer.querySelector(`.page-wrapper[data-page="${h.page}"]`);
+  if (wrapper) wrapper.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function deleteHighlight(id) {
+  const tab = getTab(); if (!tab) return;
+  pushHistory(tab);
+  tab.highlights = tab.highlights.filter(h => h.id !== id);
+  redrawAllHighlights();
+  updateHiPanel();
+  markUnsaved(tab);
+  toast('হাইলাইট মুছা হয়েছে');
+}
+
+/* ═══════════════════════════════════════════
+   CLEAR PAGE
+   ═══════════════════════════════════════════ */
+document.getElementById('clear-page-btn').addEventListener('click', () => {
+  const tab = getTab(); if (!tab) return;
+  // Clear all pages' highlights
+  if (!tab.highlights.length) return;
+  pushHistory(tab);
+  tab.highlights = [];
+  redrawAllHighlights();
+  updateHiPanel();
+  markUnsaved(tab);
+  toast('সব হাইলাইট মুছা হয়েছে');
+});
+
+/* ═══════════════════════════════════════════
+   TOOLBAR EVENT WIRING
+   ═══════════════════════════════════════════ */
+
+// Draw mode
+document.querySelectorAll('.tool-btn[data-mode]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tool-btn[data-mode]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    drawMode = btn.dataset.mode;
+    updateAllCursors();
+    // Update mobile mode btn
+    const mb = document.getElementById('mb-mode');
+    const icons  = { highlight:'fa-highlighter', erase:'fa-eraser', pan:'fa-hand' };
+    const labels = { highlight:'হাইলাইট', erase:'ইরেজ', pan:'প্যান' };
+    mb.querySelector('i').className = `fa-solid ${icons[drawMode]}`;
+    mb.querySelector('span').textContent = labels[drawMode];
   });
 });
 
-/* ════════════════════════════════════════════
-   TOOLBAR CONTROLS
-   ════════════════════════════════════════════ */
-
-// Draw mode buttons
-document.querySelectorAll('.mode-btn').forEach(b => {
-  b.addEventListener('click', () => {
-    document.querySelectorAll('.mode-btn').forEach(x => x.classList.remove('active'));
-    b.classList.add('active');
-    drawMode = b.dataset.mode;
-
-    canvasWrapper.classList.remove('tool-pan', 'tool-erase');
-    if (drawMode === 'pan')   canvasWrapper.classList.add('tool-pan');
-    if (drawMode === 'erase') canvasWrapper.classList.add('tool-erase');
-  });
-});
-
-// Preset color swatches
-document.querySelectorAll('.swatch:not(.custom-swatch)').forEach(s => {
+// Color swatches
+document.querySelectorAll('.swatch').forEach(s => {
   s.addEventListener('click', () => {
     document.querySelectorAll('.swatch').forEach(x => x.classList.remove('active'));
     s.classList.add('active');
@@ -1193,220 +1056,205 @@ document.querySelectorAll('.swatch:not(.custom-swatch)').forEach(s => {
   });
 });
 
-// Custom color picker
-document.getElementById('custom-color-picker').addEventListener('input', e => {
+document.getElementById('custom-color').addEventListener('input', e => {
   const hex = e.target.value;
-  const r   = parseInt(hex.slice(1, 3), 16);
-  const g   = parseInt(hex.slice(3, 5), 16);
-  const b   = parseInt(hex.slice(5, 7), 16);
+  const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
   COLOR_MAP.custom = { r, g, b, hex };
   document.querySelector('.custom-swatch').style.background = hex;
   document.querySelectorAll('.swatch').forEach(x => x.classList.remove('active'));
   document.querySelector('.custom-swatch').classList.add('active');
   activeColor = 'custom';
-  // Sync mobile grid
-  const cpEl = document.querySelector('.cp-swatch[data-name="custom"]');
-  if (cpEl) { cpEl.style.background = hex; cpEl.style.backgroundImage = 'none'; }
 });
 
-// Opacity slider
-document.getElementById('op-slider').addEventListener('input', e => {
-  activeOpacity = +e.target.value;
-  document.getElementById('op-val').textContent = e.target.value + '%';
+// Opacity
+opSlider.addEventListener('input', () => {
+  activeOpacity = +opSlider.value;
+  opVal.textContent = activeOpacity + '%';
 });
 
-// Undo / Redo / Save / Clear
-document.getElementById('undo-btn').addEventListener('click', undo);
-document.getElementById('redo-btn').addEventListener('click', redo);
+// Save
 document.getElementById('save-btn').addEventListener('click', saveFile);
-document.getElementById('clear-page-btn').addEventListener('click', () => {
-  const tab = getTab(); if (!tab) return;
-  pushHistory(tab);
-  tab.highlights = tab.highlights.filter(h => h.page !== tab.currentPage);
-  redrawHighlights();
-  updateSidebar();
-  toast('<i class="fa-solid fa-trash-can"></i> এই পেজের হাইলাইট মুছা হয়েছে');
-});
 
-/* ════════════════════════════════════════════
-   FILE OPEN TRIGGERS
-   ════════════════════════════════════════════ */
-fileInput.addEventListener('change', e => {
-  if (e.target.files.length) openFiles(e.target.files);
-  e.target.value = '';
-});
-
-[
-  document.getElementById('header-file-btn'),
-  document.getElementById('dz-file-btn'),
-  addTabBtn,
-  document.getElementById('mb-file'),
-].forEach(btn => {
+// Open file
+[document.getElementById('header-file-btn'), document.getElementById('dz-file-btn'), addTabBtn].forEach(btn => {
   if (btn) btn.addEventListener('click', () => fileInput.click());
 });
+fileInput.addEventListener('change', e => { openFiles(e.target.files); fileInput.value = ''; });
 
-/* ════════════════════════════════════════════
-   URL LOADING
-   ════════════════════════════════════════════ */
-document.getElementById('url-load-btn').addEventListener('click', () => {
-  const inp = document.getElementById('header-url-input');
-  loadFromUrl(inp.value, inp);
-});
-document.getElementById('header-url-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter') loadFromUrl(e.target.value, e.target);
-});
-
-document.getElementById('dz-url-load-btn').addEventListener('click', () => {
-  const inp = document.getElementById('dz-url-input');
-  loadFromUrl(inp.value, inp);
-});
-document.getElementById('dz-url-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter') loadFromUrl(e.target.value, e.target);
+// URL inputs
+const hUrlInput = document.getElementById('header-url-input');
+document.getElementById('url-load-btn').addEventListener('click', () => loadFromUrl(hUrlInput.value, hUrlInput));
+hUrlInput.addEventListener('keydown', e => { if (e.key==='Enter') loadFromUrl(hUrlInput.value, hUrlInput); });
+hUrlInput.addEventListener('paste', e => {
+  const p = (e.clipboardData||window.clipboardData).getData('text').trim();
+  if (p.startsWith('http://') || p.startsWith('https://')) { e.preventDefault(); loadFromUrl(p, hUrlInput); }
 });
 
-/* ════════════════════════════════════════════
+const dzUrlInput = document.getElementById('dz-url-input');
+document.getElementById('dz-url-btn').addEventListener('click', () => loadFromUrl(dzUrlInput.value, dzUrlInput));
+dzUrlInput.addEventListener('keydown', e => { if (e.key==='Enter') loadFromUrl(dzUrlInput.value, dzUrlInput); });
+dzUrlInput.addEventListener('paste', e => {
+  const p = (e.clipboardData||window.clipboardData).getData('text').trim();
+  if (p.startsWith('http://') || p.startsWith('https://')) { e.preventDefault(); loadFromUrl(p, dzUrlInput); }
+});
+
+// Sidebar toggle
+document.getElementById('sidebar-toggle').addEventListener('click', () => {
+  const sb = document.getElementById('thumb-sidebar');
+  sb.classList.toggle('open');
+});
+
+/* ═══════════════════════════════════════════
    DRAG & DROP
-   ════════════════════════════════════════════ */
-dropZone.addEventListener('dragover', e => {
-  e.preventDefault();
-  dropZone.classList.add('dragging');
-});
-dropZone.addEventListener('dragleave', e => {
-  if (!dropZone.contains(e.relatedTarget)) dropZone.classList.remove('dragging');
-});
-dropZone.addEventListener('drop', e => {
-  e.preventDefault();
-  dropZone.classList.remove('dragging');
+   ═══════════════════════════════════════════ */
+const dzEl = document.getElementById('drop-zone');
+dzEl.addEventListener('dragover',  e => { e.preventDefault(); dzEl.classList.add('drag-over'); });
+dzEl.addEventListener('dragleave', e => { if (!dzEl.contains(e.relatedTarget)) dzEl.classList.remove('drag-over'); });
+dzEl.addEventListener('drop', e => {
+  e.preventDefault(); dzEl.classList.remove('drag-over');
   if (e.dataTransfer.files.length) openFiles(e.dataTransfer.files);
 });
-
-// Global drop
 document.addEventListener('dragover', e => e.preventDefault());
 document.addEventListener('drop', e => {
   e.preventDefault();
   if (e.dataTransfer.files.length) openFiles(e.dataTransfer.files);
 });
 
-/* ════════════════════════════════════════════
-   MOBILE CONTROLS
-   ════════════════════════════════════════════ */
-document.getElementById('mb-highlight').addEventListener('click', () => {
-  const modes  = ['highlight', 'erase', 'pan'];
-  const labels = { highlight: 'হাইলাইট', erase: 'ইরেজ', pan: 'প্যান' };
-  const icons  = { highlight: 'fa-highlighter', erase: 'fa-eraser', pan: 'fa-hand' };
-  const next   = modes[(modes.indexOf(drawMode) + 1) % modes.length];
-  document.querySelector(`.mode-btn[data-mode="${next}"]`)?.click();
-  const btn    = document.getElementById('mb-highlight');
-  btn.querySelector('i').className = `fa-solid ${icons[next]}`;
-  btn.querySelector('span').textContent = labels[next];
-  toast(`<i class="fa-solid ${icons[next]}"></i> মোড: ${labels[next]}`);
-});
-
-document.getElementById('mb-rotate').addEventListener('click', () => rotate('cw'));
+/* ═══════════════════════════════════════════
+   MOBILE BAR
+   ═══════════════════════════════════════════ */
+document.getElementById('mb-file').addEventListener('click', () => fileInput.click());
 document.getElementById('mb-save').addEventListener('click', saveFile);
 
-document.getElementById('mb-list').addEventListener('click', () => {
-  updateMobileSidebar();
-  document.getElementById('sidebar-modal').classList.add('open');
+// Mobile mode cycle
+document.getElementById('mb-mode').addEventListener('click', () => {
+  const modes = ['highlight','erase','pan'];
+  const next  = modes[(modes.indexOf(drawMode)+1) % modes.length];
+  document.querySelector(`.tool-btn[data-mode="${next}"]`).click();
 });
-
-document.getElementById('sidebar-modal').addEventListener('click', e => {
-  if (e.target === document.getElementById('sidebar-modal')) closeMobileModal();
-});
-
-function closeMobileModal() {
-  document.getElementById('sidebar-modal').classList.remove('open');
-}
 
 // Mobile color modal
 document.getElementById('mb-color').addEventListener('click', () => {
-  document.getElementById('color-modal').classList.add('open');
+  // Populate mob color grid
+  const grid = document.getElementById('mob-color-grid');
+  grid.innerHTML = '';
+  Object.entries(COLOR_MAP).forEach(([name, c]) => {
+    const s = document.createElement('div');
+    s.className = `mob-swatch${activeColor===name?' active':''}`;
+    s.style.background = name==='custom'
+      ? 'conic-gradient(red,yellow,green,cyan,blue,magenta,red)'
+      : c.hex;
+    s.title = name;
+    s.addEventListener('click', () => {
+      document.querySelectorAll('.mob-swatch').forEach(x => x.classList.remove('active'));
+      s.classList.add('active');
+      activeColor = name;
+      // sync desktop swatch
+      document.querySelectorAll('.swatch').forEach(x => x.classList.toggle('active', x.dataset.color===name));
+    });
+    grid.appendChild(s);
+  });
+  document.getElementById('color-modal').classList.remove('hidden');
 });
-document.getElementById('close-color-modal').addEventListener('click', () => {
-  document.getElementById('color-modal').classList.remove('open');
-});
+document.getElementById('close-color-modal').addEventListener('click', () =>
+  document.getElementById('color-modal').classList.add('hidden')
+);
 document.getElementById('color-modal').addEventListener('click', e => {
   if (e.target === document.getElementById('color-modal'))
-    document.getElementById('color-modal').classList.remove('open');
+    document.getElementById('color-modal').classList.add('hidden');
 });
 
-/* ════════════════════════════════════════════
-   MOBILE COLOR GRID — build dynamically
-   ════════════════════════════════════════════ */
-const colorGrid = document.getElementById('color-grid');
+// Mobile highlight list modal
+document.getElementById('mb-hi').addEventListener('click', () => {
+  const tab = getTab();
+  const all = tab ? tab.highlights : [];
+  const ml  = document.getElementById('mob-hi-list');
 
-Object.entries(COLOR_MAP).forEach(([name, c]) => {
-  const div       = document.createElement('div');
-  div.className   = 'cp-swatch' + (name === activeColor ? ' active' : '');
-  div.dataset.name = name;
-
-  if (name === 'custom') {
-    div.style.backgroundImage = 'linear-gradient(135deg,#ff6b6b,#ffd93d,#6bcb77,#4d96ff)';
-    div.title = 'কাস্টম রঙ';
-    div.style.position = 'relative';
-
-    const inp   = document.createElement('input');
-    inp.type    = 'color';
-    inp.value   = '#FFC107';
-    inp.style.cssText = 'opacity:0;position:absolute;inset:0;width:100%;height:100%;cursor:pointer;border:none;padding:0;';
-    inp.addEventListener('input', e => {
-      const hex = e.target.value;
-      const r   = parseInt(hex.slice(1, 3), 16);
-      const g   = parseInt(hex.slice(3, 5), 16);
-      const b   = parseInt(hex.slice(5, 7), 16);
-      COLOR_MAP.custom = { r, g, b, hex };
-      div.style.background = hex;
-      div.style.backgroundImage = 'none';
-      document.querySelector('.custom-swatch').style.background = hex;
-      document.getElementById('custom-color-picker').value = hex;
-      document.querySelectorAll('.cp-swatch, .swatch').forEach(x => x.classList.remove('active'));
-      div.classList.add('active');
-      document.querySelector('.custom-swatch')?.classList.add('active');
-      activeColor = 'custom';
-      document.getElementById('color-modal').classList.remove('open');
-      toast(`<i class="fa-solid fa-palette"></i> কাস্টম রঙ: ${hex}`);
-    });
-    div.appendChild(inp);
+  if (!all.length) {
+    ml.innerHTML = '<div class="hi-empty" style="padding:24px 0;text-align:center;color:#999">হাইলাইট নেই</div>';
   } else {
-    div.style.background = c.hex;
-    div.addEventListener('click', () => {
-      document.querySelectorAll('.cp-swatch, .swatch').forEach(x => x.classList.remove('active'));
-      div.classList.add('active');
-      document.querySelector(`.swatch[data-color="${name}"]`)?.classList.add('active');
-      activeColor = name;
-      document.getElementById('color-modal').classList.remove('open');
-      toast(`<i class="fa-solid fa-palette"></i> রঙ: ${name}`);
+    ml.innerHTML = all.map((h,i) => {
+      const c = COLOR_MAP[h.color];
+      return `<div class="hi-item">
+        <div class="hi-dot" style="background:${c.hex}"></div>
+        <div class="hi-meta">
+          <div class="hi-label">হাইলাইট ${i+1} — পেজ ${h.page}</div>
+          <div class="hi-sub">${Math.round(h.w)}×${Math.round(h.h)}px</div>
+        </div>
+        <button class="hi-del" style="opacity:1" onclick="deleteHighlight(${h.id});document.getElementById('mob-hi-list').innerHTML=''">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>`;
+    }).join('');
+  }
+  document.getElementById('hi-modal').classList.remove('hidden');
+});
+document.getElementById('close-hi-modal').addEventListener('click', () =>
+  document.getElementById('hi-modal').classList.add('hidden')
+);
+document.getElementById('hi-modal').addEventListener('click', e => {
+  if (e.target === document.getElementById('hi-modal'))
+    document.getElementById('hi-modal').classList.add('hidden');
+});
+
+/* ═══════════════════════════════════════════
+   KEYBOARD SHORTCUTS
+   ═══════════════════════════════════════════ */
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  const ctrl = e.ctrlKey || e.metaKey;
+
+  if (ctrl && e.key === 's') { e.preventDefault(); saveFile(); return; }
+  if (ctrl && e.key === 'o') { e.preventDefault(); fileInput.click(); return; }
+  if (ctrl && e.key === 'z') { e.preventDefault(); undo(); return; }
+  if (ctrl && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); redo(); return; }
+  if (ctrl && e.key === '=') { e.preventDefault(); setZoom(zoomLevel + 0.25); return; }
+  if (ctrl && e.key === '-') { e.preventDefault(); setZoom(zoomLevel - 0.25); return; }
+  if (e.key === 'h' || e.key === 'H') { document.querySelector('.tool-btn[data-mode="highlight"]').click(); return; }
+  if (e.key === 'e' || e.key === 'E') { document.querySelector('.tool-btn[data-mode="erase"]').click(); return; }
+  if (e.key === 'v' || e.key === 'V') { document.querySelector('.tool-btn[data-mode="pan"]').click(); return; }
+});
+
+/* ═══════════════════════════════════════════
+   PINCH ZOOM (mobile)
+   ═══════════════════════════════════════════ */
+let pinchDist = 0;
+document.getElementById('pdf-viewer').addEventListener('touchstart', e => {
+  if (e.touches.length === 2) {
+    pinchDist = Math.hypot(
+      e.touches[0].clientX - e.touches[1].clientX,
+      e.touches[0].clientY - e.touches[1].clientY
+    );
+  }
+}, { passive: true });
+
+document.getElementById('pdf-viewer').addEventListener('touchmove', e => {
+  if (e.touches.length === 2) {
+    const d = Math.hypot(
+      e.touches[0].clientX - e.touches[1].clientX,
+      e.touches[0].clientY - e.touches[1].clientY
+    );
+    const delta = d - pinchDist;
+    pinchDist = d;
+    if (Math.abs(delta) > 2) setZoom(zoomLevel + delta * 0.005);
+  }
+}, { passive: true });
+
+/* ═══════════════════════════════════════════
+   SCROLL → THUMB SYNC
+   ═══════════════════════════════════════════ */
+document.getElementById('pdf-viewer').addEventListener('scroll', () => {
+  const viewer = document.getElementById('pdf-viewer');
+  const midY   = viewer.scrollTop + viewer.clientHeight / 2;
+  let   active = null;
+  pagesContainer.querySelectorAll('.page-wrapper').forEach(w => {
+    const top = w.offsetTop;
+    const bot = top + w.offsetHeight;
+    if (midY >= top && midY < bot) active = +w.dataset.page;
+  });
+  if (active) {
+    thumbList.querySelectorAll('.thumb-item').forEach(t => {
+      t.classList.toggle('active', +t.dataset.page === active);
     });
   }
-
-  colorGrid.appendChild(div);
-});
-
-/* ════════════════════════════════════════════
-   KEYBOARD SHORTCUTS
-   ════════════════════════════════════════════ */
-document.addEventListener('keydown', e => {
-  const tag = document.activeElement.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-
-  if (e.ctrlKey || e.metaKey) {
-    if (e.key === 'z') { e.preventDefault(); undo(); return; }
-    if (e.key === 'y') { e.preventDefault(); redo(); return; }
-    if (e.key === 's') { e.preventDefault(); saveFile(); return; }
-    if (e.key === '+' || e.key === '=') { e.preventDefault(); document.getElementById('zoom-in').click(); return; }
-    if (e.key === '-') { e.preventDefault(); document.getElementById('zoom-out').click(); return; }
-  }
-
-  if (!activeTabId) return;
-  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') document.getElementById('next-page').click();
-  if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')   document.getElementById('prev-page').click();
-  if (e.key === 'h' || e.key === 'H') document.querySelector('.mode-btn[data-mode="highlight"]')?.click();
-  if (e.key === 'e' || e.key === 'E') document.querySelector('.mode-btn[data-mode="erase"]')?.click();
-  if (e.key === 'p' || e.key === 'P') document.querySelector('.mode-btn[data-mode="pan"]')?.click();
-  if (e.key === 'r' || e.key === 'R') rotate('cw');
-});
-
-/* ════════════════════════════════════════════
-   INIT
-   ════════════════════════════════════════════ */
-updatePageLabel();
+}, { passive: true });
